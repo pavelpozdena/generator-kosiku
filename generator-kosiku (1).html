@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>🧺 Generátor košíků</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>body{margin:0;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const {useState,useRef,useEffect,useCallback}=React;
+
+function ellipsePt(cx,cy,rx,ry,a){return{x:cx+rx*Math.cos(a),y:cy+ry*Math.sin(a)};}
+function pathEllipse(cx,cy,rx,ry,N=120){let d="";for(let i=0;i<=N;i++){const a=(i/N)*Math.PI*2,p=ellipsePt(cx,cy,rx,ry,a);d+=(i===0?"M":"L")+` ${p.x.toFixed(2)} ${p.y.toFixed(2)} `;}return d+"Z";}
+function pathRect(cx,cy,rx,ry){const f=v=>v.toFixed(2);return `M${f(cx-rx)} ${f(cy-ry)} L${f(cx+rx)} ${f(cy-ry)} L${f(cx+rx)} ${f(cy+ry)} L${f(cx-rx)} ${f(cy+ry)}Z`;}
+function ellipseNormal(a,rx,ry){const nx0=Math.cos(a)/(rx*rx),ny0=Math.sin(a)/(ry*ry),len=Math.sqrt(nx0*nx0+ny0*ny0);return{nx:nx0/len,ny:ny0/len};}
+
+function calcSlotCount(shape,bW,bH,tW,tH,staveWidth,slotLen){
+  const bRx=bW/2,bRy=shape==="round"?bRx:bH/2,tRx=tW/2,tRy=shape==="round"?tRx:tH/2;
+  const aRx=(bRx+tRx)/2,aRy=(bRy+tRy)/2;
+  let perim;
+  if(shape==="rect") perim=2*(aRx*2+aRy*2);
+  else if(shape==="round") perim=2*Math.PI*aRx;
+  else perim=Math.PI*(3*(aRx+aRy)-Math.sqrt((3*aRx+aRy)*(aRx+3*aRy)));
+  // Pravidla: rozteč sloupků min. 35 mm (jinak šířka+20), vždy lichý počet (nahoru),
+  // mezera mezi sloty (hrana–hrana) nikdy pod 1,6 cm.
+  const pitch=Math.max(35,staveWidth+20);
+  let n=Math.max(5,Math.ceil(perim/pitch));
+  if(n%2===0)n++;                                  // lichý, vždy nahoru
+  while(n>3 && (perim/n-slotLen)<16) n-=2;         // tvrdá podmínka: mezera mezi sloty ≥ 16 mm
+  if(n%2===0)n--;
+  return Math.max(3,n);
+}
+
+function slotSVG(px,py,nx,ny,slotW,slotH,thick,offset,color){
+  const f=v=>v.toFixed(2),tx=-ny,ty=nx;
+  const depth=Math.max(1,thick-offset-1.5),actualH=Math.min(slotH,depth);
+  const mx=px-nx*(offset+actualH/2),my=py-ny*(offset+actualH/2);
+  const hw=slotW/2,hh=actualH/2;
+  const p0=[mx+tx*hw+nx*hh,my+ty*hw+ny*hh],p1=[mx-tx*hw+nx*hh,my-ty*hw+ny*hh];
+  const p2=[mx-tx*hw-nx*hh,my-ty*hw-ny*hh],p3=[mx+tx*hw-nx*hh,my+ty*hw-ny*hh];
+  return `<path d="M${f(p0[0])} ${f(p0[1])} L${f(p1[0])} ${f(p1[1])} L${f(p2[0])} ${f(p2[1])} L${f(p3[0])} ${f(p3[1])}Z" fill="white" stroke="${color}" stroke-width="0.9"/>`;
+}
+
+function makeSlotAngles(n){return Array.from({length:n},(_,i)=>(i/n)*Math.PI*2);}
+function makeRectSlotFracs(n,rx,ry,depth,offset,staveW=0){
+  const W=rx*2,H=ry*2,perim=2*(W+H),margin=Math.max(depth+offset+3,Math.min(rx,ry)*0.1)+staveW;
+  const result=[],sideLens=[W,H,W,H],counts=sideLens.map(l=>Math.max(1,Math.round((l/perim)*n)));
+  for(let si=0;si<4;si++){const cnt=counts[si],usable=sideLens[si]-margin*2;if(usable<=0)continue;for(let i=0;i<cnt;i++){const t=cnt===1?0.5:i/(cnt-1);result.push({si,frac:(margin+t*usable)/sideLens[si]});}}
+  return result;
+}
+function rectFracToPoint(cx,cy,rx,ry,si,frac){
+  const W=rx*2,H=ry*2,sides=[
+    {x0:cx-rx,y0:cy-ry,dx:1,dy:0,nx:0,ny:-1,len:W},
+    {x0:cx+rx,y0:cy-ry,dx:0,dy:1,nx:1,ny:0,len:H},
+    {x0:cx+rx,y0:cy+ry,dx:-1,dy:0,nx:0,ny:1,len:W},
+    {x0:cx-rx,y0:cy+ry,dx:0,dy:-1,nx:-1,ny:0,len:H},
+  ];
+  const s=sides[si];return{px:s.x0+s.dx*frac*s.len,py:s.y0+s.dy*frac*s.len,nx:s.nx,ny:s.ny};
+}
+
+function buildBottom(cx,cy,rx,ry,shape,angles,rectFracs,slotW,slotH,thick,offset,color){
+  const bodyD=shape==="rect"?pathRect(cx,cy,rx,ry):pathEllipse(cx,cy,rx,ry);
+  const body=`<path d="${bodyD}" fill="#ffe8d8" stroke="${color}" stroke-width="1.2"/>`;
+  let slots="";
+  if(shape==="rect"&&rectFracs){
+    for(const{si,frac}of rectFracs){const{px,py,nx,ny}=rectFracToPoint(cx,cy,rx,ry,si,frac);slots+=slotSVG(px,py,nx,ny,slotW,slotH,thick,offset,color);}
+    const d2=1/Math.sqrt(2);
+    const aH=Math.min(slotH,Math.max(1,thick-offset-1.5));
+    const D=Math.SQRT2*offset+(slotW+aH)/2;  // nejbližší bod slotu = offset od obou hran rohu
+    const shift=D-(offset+aH/2);
+    const corners=[{px:cx-rx,py:cy-ry,nx1:-1,ny1:-1},{px:cx+rx,py:cy-ry,nx1:1,ny1:-1},{px:cx+rx,py:cy+ry,nx1:1,ny1:1},{px:cx-rx,py:cy+ry,nx1:-1,ny1:1}];
+    for(const{px,py,nx1,ny1}of corners)slots+=slotSVG(px-nx1*d2*shift,py-ny1*d2*shift,nx1*d2,ny1*d2,slotW,slotH,thick,offset,color);
+  } else {
+    for(const a of angles){const p=ellipsePt(cx,cy,rx,ry,a),n=ellipseNormal(a,rx,ry);slots+=slotSVG(p.x,p.y,n.nx,n.ny,slotW,slotH,thick,offset,color);}
+  }
+  return body+slots;
+}
+
+function buildTop(cx,cy,oRx,oRy,thick,shape,angles,rectFracs,slotW,slotH,offset,color,puzzleJoint){
+  const iRx=oRx-thick, iRy=oRy-thick;
+  const f=v=>v.toFixed(3);
+
+  const makeSlots=()=>{
+    let slots="";
+    if(shape==="rect"&&rectFracs){
+      for(const{si,frac}of rectFracs){const{px,py,nx,ny}=rectFracToPoint(cx,cy,oRx,oRy,si,frac);slots+=slotSVG(px,py,nx,ny,slotW,slotH,thick,offset,color);}
+      const d2=1/Math.sqrt(2);
+      const aH=Math.min(slotH,Math.max(1,thick-offset-1.5));
+      const D=Math.SQRT2*offset+(slotW+aH)/2;  // nejbližší bod slotu = offset od obou hran rohu
+      const shift=D-(offset+aH/2);
+      const corners=[{px:cx-oRx,py:cy-oRy,nx1:-1,ny1:-1},{px:cx+oRx,py:cy-oRy,nx1:1,ny1:-1},{px:cx+oRx,py:cy+oRy,nx1:1,ny1:1},{px:cx-oRx,py:cy+oRy,nx1:-1,ny1:1}];
+      for(const{px,py,nx1,ny1}of corners)slots+=slotSVG(px-nx1*d2*shift,py-ny1*d2*shift,nx1*d2,ny1*d2,slotW,slotH,thick,offset,color);
+    } else {
+      for(const a of angles){const p=ellipsePt(cx,cy,oRx,oRy,a),nn=ellipseNormal(a,oRx,oRy);slots+=slotSVG(p.x,p.y,nn.nx,nn.ny,slotW,slotH,thick,offset,color);}
+    }
+    return slots;
+  };
+
+  if(!puzzleJoint){
+    let outerD,innerD;
+    if(shape==="rect"){
+      outerD=pathRect(cx,cy,oRx,oRy);
+      innerD=`M${f(cx-iRx)} ${f(cy-iRy)} L${f(cx-iRx)} ${f(cy+iRy)} L${f(cx+iRx)} ${f(cy+iRy)} L${f(cx+iRx)} ${f(cy-iRy)}Z`;
+    } else {
+      outerD=pathEllipse(cx,cy,oRx,oRy);
+      innerD=pathEllipse(cx,cy,iRx,iRy);
+    }
+    return `<path d="${outerD} ${innerD}" fill-rule="evenodd" fill="#ffe8d8" stroke="${color}" stroke-width="1.2"/>`+makeSlots();
+  }
+
+  // ═══ PUZZLE SPOJ = jedna řezná křivka napříč obrubou ═══
+  // Profil: mechanický háčkový spoj – dva prsty se vzájemně zaklesnou (jako u puzzle).
+  // Existuje pouze jedna čára řezu; rozdělením vznikne samec i samice.
+
+  // Umístění spoje: vlevo na obrubě, vycentrované mezi sousední sloty
+  // (včetně tečného přesahu hlavičky tb+hd = 0.30·dlen)
+  let iX,iY,oX,oY;
+  if(shape==="rect"){
+    // levá strana hranolu (si=3); najdi dvojici sousedních slotů nejblíž středu
+    const ys=(rectFracs||[]).filter(q=>q.si===3).map(q=>cy+oRy-q.frac*oRy*2).sort((a,b)=>a-b);
+    let yJ=cy;
+    if(ys.length>=2){
+      let best=[ys[0],ys[1]],bd=1e9;
+      for(let i=0;i<ys.length-1;i++){const mid=(ys[i]+ys[i+1])/2,d0=Math.abs(mid-cy);if(d0<bd){bd=d0;best=[ys[i],ys[i+1]];}}
+      yJ=(best[0]+best[1])/2;
+    }
+    yJ+=thick*0.15; // výrůstek míří k −y, posuň čáru o polovinu jeho přesahu
+    iX=cx-iRx; iY=yJ; oX=cx-oRx; oY=yJ;
+  } else {
+    let splitAng;
+    {
+      let below=-1e9, above=1e9;
+      for(const a of angles){ if(a<Math.PI&&a>below)below=a; if(a>=Math.PI&&a<above)above=a; }
+      if(below===-1e9)below=Math.max(...angles)-Math.PI*2;
+      if(above=== 1e9)above=Math.min(...angles)+Math.PI*2;
+      splitAng=(below+above)/2;
+      const iX0=cx+Math.cos(splitAng)*iRx, iY0=cy+Math.sin(splitAng)*iRy;
+      const oX0=cx+Math.cos(splitAng)*oRx, oY0=cy+Math.sin(splitAng)*oRy;
+      const dl0=Math.hypot(oX0-iX0,oY0-iY0);
+      const ntx0=-(oY0-iY0)/dl0, nty0=(oX0-iX0)/dl0;
+      const Tx=-Math.sin(splitAng), Ty=Math.cos(splitAng);
+      const s=(ntx0*Tx+nty0*Ty)>0?1:-1;
+      const rMid=Math.hypot((iX0+oX0)/2-cx,(iY0+oY0)/2-cy);
+      splitAng -= s*(dl0*0.30/2)/rMid;
+    }
+    iX=cx+Math.cos(splitAng)*iRx; iY=cy+Math.sin(splitAng)*iRy;
+    oX=cx+Math.cos(splitAng)*oRx; oY=cy+Math.sin(splitAng)*oRy;
+  }
+
+  // Lokální osy: nr = radiálně (inner→outer), nt = tečně
+  const ddx=oX-iX, ddy=oY-iY;
+  const dlen=Math.sqrt(ddx*ddx+ddy*ddy);
+  const nrx=ddx/dlen, nry=ddy/dlen;
+  const ntx=-nry, nty=nrx;
+
+  // Lokální souřadnice (lr = napříč obrubou, lt = tečně) → globální bod
+  const PT=(lr,lt)=>[iX+lr*nrx+lt*ntx, iY+lr*nry+lt*nty];
+
+  // Geometrie spoje (dle náčrtu: krček + rozšířená hlavička tvaru T/hříbek)
+  // U úzké obruby drží minimální absolutní rozměry, aby spoj zůstal pevný.
+  const nw  = Math.max(dlen*0.10,1.5);    // polovina šířky krčku (radiálně)
+  const hw  = Math.max(dlen*0.18,nw+1.2); // polovina šířky hlavičky – širší než krček => zámek
+  const tb  = Math.max(dlen*0.12,1.5);    // délka krčku (tečně)
+  const hd  = Math.max(dlen*0.18,2.5);    // hloubka hlavičky (tečně)
+  const rad = dlen*0.12; // max. zaoblení rohů
+  const pos = dlen*0.50; // střed spoje napříč obrubou
+
+  // Kvadratický oblouk vzorkovaný na L segmenty (v path jen M/L => DXF export funguje)
+  const quad=(p0,c,p1,n=8)=>{const o=[];for(let i=1;i<=n;i++){const t=i/n,u=1-t;
+    o.push([u*u*p0[0]+2*u*t*c[0]+t*t*p1[0],u*u*p0[1]+2*u*t*c[1]+t*t*p1[1]]);}return o;};
+
+  // Rohové body JEDINÉ dělicí křivky (lokálně: [tečně, radiálně])
+  // vnitřní okraj │ → obrys T-hlavičky → │ vnější okraj
+  // Po rozdělení: jeden díl má čep (samec), druhý kapsu s převislými rty (samice).
+  const corner=[
+    [0,0],[0,pos-nw],[tb,pos-nw],[tb,pos-hw],[tb+hd,pos-hw],
+    [tb+hd,pos+hw],[tb,pos+hw],[tb,pos+nw],[0,pos+nw],[0,dlen]
+  ];
+  // adaptivní zaoblení rohů, aby se sousední oblouky nepřekrývaly
+  const loc=[corner[0]];
+  for(let i=1;i<corner.length-1;i++){
+    const A0=corner[i-1],B0=corner[i],C0=corner[i+1];
+    const l1=Math.hypot(B0[0]-A0[0],B0[1]-A0[1]),l2=Math.hypot(C0[0]-B0[0],C0[1]-B0[1]);
+    const rr=Math.min(rad,l1*0.45,l2*0.45);
+    const e1=[B0[0]+(A0[0]-B0[0])/l1*rr,B0[1]+(A0[1]-B0[1])/l1*rr];
+    const e2=[B0[0]+(C0[0]-B0[0])/l2*rr,B0[1]+(C0[1]-B0[1])/l2*rr];
+    loc.push(e1,...quad(e1,B0,e2));
+  }
+  loc.push(corner[corner.length-1]);
+
+  // Konce leží PŘESNĚ na okrajích: [0,0] = bod vnitřní elipsy, [0,dlen] = bod vnější elipsy
+  const puzzleCutPath="M"+loc.map(([lt,lr])=>{const g=PT(lr,lt);return `${f(g[0])},${f(g[1])}`;}).join(" L");
+
+  const outerD2=shape==="rect"?pathRect(cx,cy,oRx,oRy):pathEllipse(cx,cy,oRx,oRy);
+  const innerD2=shape==="rect"?pathRect(cx,cy,iRx,iRy):pathEllipse(cx,cy,iRx,iRy);
+  const ring=`<path d="${outerD2} ${innerD2}" fill-rule="evenodd" fill="#ffe8d8" stroke="${color}" stroke-width="1.2"/>`;
+  const puzzleCut=`<path d="${puzzleCutPath}" fill="none" stroke="${color}" stroke-width="1.0" stroke-linecap="round" stroke-linejoin="round"/>`;
+  return `<g>${ring}${puzzleCut}${makeSlots()}</g>`;
+}
+
+function buildStave(cx,cy,sw,totalH,tnw,tl,bendType,bendAmt,waist,bulge,color){
+  const f=v=>v.toFixed(2);
+  // Konce: tělo → rozšířený límec (dosedne na obrubu) → rovný čep
+  // hluboký přesně jako překližka (nevyčnívá ven), dva pružné prořezy.
+  const cw=sw*1.2, ch=5;
+  const chf=0.5, chh=1;   // sražení špičky čepu: 0,5 mm do strany, 1 mm na výšku (náběh)
+  const t2=tnw/2, bodyTop=cy+tl, bodyBot=cy+totalH-tl;
+  const wAt=t=>{if(bendType==="vase"){const d=Math.abs(t-.5);return waist+(1-waist)*(d/.5)**1.8;}if(bendType==="bulge"){const d=Math.abs(t-.5);return 1+(bulge-1)*(1-(d/.5)**2);}return 1;};
+  const bAt=t=>bendType==="S"?bendAmt*Math.sin(t*Math.PI):0;
+  const steps=30,Rt=[],Lt=[];
+  for(let i=0;i<=steps;i++){const t=i/steps,yy=bodyTop+ch+t*(bodyBot-bodyTop-2*ch),w=wAt(t)*sw/2,bx=bAt(t);Rt.push([cx+bx+w,yy]);Lt.push([cx+bx-w,yy]);}
+  const pts=[
+    [cx-t2+chf,cy],[cx+t2-chf,cy],[cx+t2,cy+chh],[cx+t2,bodyTop],[cx+cw/2,bodyTop],
+    ...Rt,
+    [cx+cw/2,bodyBot],[cx+t2,bodyBot],[cx+t2,cy+totalH-chh],[cx+t2-chf,cy+totalH],
+    [cx-t2+chf,cy+totalH],[cx-t2,cy+totalH-chh],[cx-t2,bodyBot],[cx-cw/2,bodyBot],
+    ...Lt.slice().reverse(),
+    [cx-cw/2,bodyTop],[cx-t2,bodyTop],[cx-t2,cy+chh]
+  ];
+  const d="M"+pts.map(q=>`${f(q[0])} ${f(q[1])}`).join(" L")+"Z";
+  let svg=`<path d="${d}" fill="#ffe8d8" stroke="${color}" stroke-width="1"/>`;
+  // dva pružné prořezy v každém čepu (řezné čáry, kerf vytvoří mezeru)
+  const so=tnw*0.25, sl=tl;
+  svg+=`<path d="M${f(cx-so)} ${f(cy)} L${f(cx-so)} ${f(cy+sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
+  svg+=`<path d="M${f(cx+so)} ${f(cy)} L${f(cx+so)} ${f(cy+sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
+  svg+=`<path d="M${f(cx-so)} ${f(cy+totalH)} L${f(cx-so)} ${f(cy+totalH-sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
+  svg+=`<path d="M${f(cx+so)} ${f(cy+totalH)} L${f(cx+so)} ${f(cy+totalH-sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
+  return svg;
+}
+
+function generateSVG(p,slotCount){
+  const{shape,bottomW,bottomH,topW,topH,basketHeight,matThick,staveWidth,
+    bendType,bendAmount,waistRatio,bulgeRatio,ringThickness,kerf,puzzleJoint,slotOrient}=p;
+  const color="#cc2200";
+  const bRx=bottomW/2,bRy=shape==="round"?bRx:bottomH/2,tRx=topW/2,tRy=shape==="round"?tRx:topH/2;
+  // ── vše odvozeno z tloušťky překližky ──
+  const tnw=staveWidth;                      // šířka čepu = šířka sloupku
+  const tl=matThick;                         // hloubka čepu = tloušťka překližky (nevyčnívá)
+  const upright=slotOrient==="rad";          // orientace slotů: naležato / nastojato
+  const slotW=Math.max(1,(upright?matThick:tnw)-kerf);  // tečný rozměr slotu
+  const slotH=Math.max(1,(upright?tnw:matThick)-kerf);  // radiální rozměr slotu
+  const edgeOffsetBot=Math.max(4,(ringThickness-slotH)/2); // dno: slot min. 4 mm od kraje
+  const edgeOffsetTop=(ringThickness-slotH)/2;             // obruba: slot ve středu pásu
+  const totalH=basketHeight+tl*2,M=24;
+  const angles=makeSlotAngles(slotCount);
+  const rectFr=shape==="rect"?makeRectSlotFracs(slotCount,bRx,bRy,slotH,edgeOffsetBot,staveWidth):null;
+  const botFracs=rectFr, topFracs=rectFr;
+  const staveCount=rectFr?rectFr.length:slotCount;
+  let parts=[];
+  const bCX=M+bRx,bCY=M+bRy;
+  parts.push(`<g><text x="${M}" y="${M-5}" font-size="9" fill="#999" font-family="sans-serif">Dno (1×) — ${bottomW}×${shape==="round"?bottomW:bottomH}mm</text>${buildBottom(bCX,bCY,bRx,bRy,shape,angles,botFracs,slotW,slotH,ringThickness,edgeOffsetBot,color)}</g>`);
+  const tOffX=M+bottomW+30,tCX=tOffX+tRx,tCY=M+tRy;
+  parts.push(`<g><text x="${tOffX}" y="${M-5}" font-size="9" fill="#999" font-family="sans-serif">Horní obruba (1×)${puzzleJoint?" [puzzle]":""}</text>${buildTop(tCX,tCY,tRx,tRy,ringThickness,shape,angles,topFracs,slotW,slotH,edgeOffsetTop,color,puzzleJoint)}</g>`);
+  const _aRx2=(bRx+tRx)/2,_aRy2=(bRy+tRy)/2;
+  const _perim2=shape==="rect"?2*(_aRx2*2+_aRy2*2):shape==="round"?2*Math.PI*_aRx2:Math.PI*(3*(_aRx2+_aRy2)-Math.sqrt((3*_aRx2+_aRy2)*(_aRx2+3*_aRy2)));
+  const _gapSlots=(_perim2/staveCount-Math.max(slotW,slotH)).toFixed(1);
+  const ringH=Math.max(bRy*2,tRy*2)+30,stavY=M+ringH+22,sp2=staveWidth*1.2+10,perRow=Math.max(1,Math.floor(900/sp2)),rows=Math.ceil(staveCount/perRow);
+  parts.push(`<text x="${M}" y="${stavY-7}" font-size="9" fill="#999" font-family="sans-serif">Sloupky (${staveCount}×) — výška ${totalH.toFixed(0)}mm, čep ${tnw.toFixed(1)}×${matThick.toFixed(1)}mm, sloty ${_gapSlots}mm od sebe</text>`);
+  for(let i=0;i<staveCount;i++){const col=i%perRow,row=Math.floor(i/perRow);parts.push(buildStave(M+col*sp2+sp2/2,stavY+row*(totalH+14),staveWidth,totalH,tnw,tl,bendType,bendAmount,waistRatio,bulgeRatio,color));}
+  let totalW=Math.max(tOffX+topW+M,perRow*sp2+M*2),totalH2=stavY+rows*(totalH+14)+M;
+  if(shape==="rect"){
+    const cY=totalH2+10;
+    parts.push(`<text x="${M}" y="${cY-5}" font-size="9" fill="#999" font-family="sans-serif">Rohové sloupky (4×)</text>`);
+    for(let i=0;i<4;i++)parts.push(buildStave(M+i*sp2+sp2/2,cY,staveWidth,totalH,tnw,tl,"straight",0,1,1,color));
+    totalH2=cY+totalH+M;
+  }
+  return{svg:`<svg xmlns="http://www.w3.org/2000/svg" width="${totalW}" height="${totalH2}" viewBox="0 0 ${totalW} ${totalH2}" style="background:white">${parts.join("")}</svg>`};
+}
+
+function toDXF(svgStr){
+  const polygons=[],pathRe=/<path[^>]*d="([^"]+)"[^>]*\/>/g;let m;
+  while((m=pathRe.exec(svgStr))!==null){
+    const raw=m[1].trim(),isClosed=raw.toUpperCase().includes('Z');
+    const subpaths=raw.split(/(?=M\s*[-\d])/i).filter(s=>s.trim().length>0);
+    for(const sub of subpaths){
+      const pts=[],cmdRe=/([ML])\s*([-\d.]+)[\s,]+([-\d.]+)/gi;let c;
+      while((c=cmdRe.exec(sub))!==null)pts.push([parseFloat(c[2]),parseFloat(c[3])]);
+      if(pts.length<2)continue;
+      let p=[...pts];
+      const first=p[0],last=p[p.length-1];
+      if(Math.abs(first[0]-last[0])<0.01&&Math.abs(first[1]-last[1])<0.01)p=p.slice(0,-1);
+      if(isClosed)polygons.push({pts:p,closed:true});
+      else polygons.push({pts:p,closed:false});
+    }
+  }
+  const f=v=>v.toFixed(4);let entities='';
+  for(const{pts,closed}of polygons){
+    if(pts.length<2)continue;
+    entities+=`0\nLWPOLYLINE\n8\n0\n70\n${closed?1:0}\n90\n${pts.length}\n`;
+    for(const[x,y]of pts)entities+=`10\n${f(x)}\n20\n${f(y)}\n`;
+  }
+  return `0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n${entities}0\nENDSEC\n0\nEOF\n`;
+}
+
+
+function Canvas3D({p,slotCount}){
+  const ref=useRef(null),rot=useRef({x:0.35,y:0.5}),drag=useRef(false),last=useRef({x:0,y:0}),raf=useRef(null);
+  const draw=useCallback(()=>{
+    const c=ref.current;if(!c)return;
+    const ctx=c.getContext("2d"),W=c.width,H=c.height;ctx.clearRect(0,0,W,H);
+    const bg=ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,W);bg.addColorStop(0,"#1e0e04");bg.addColorStop(1,"#070401");ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
+    const{shape,bottomW,bottomH,topW,topH,basketHeight,matThick,bendType,bendAmount,waistRatio,bulgeRatio,ringThickness}=p;
+    const bRx=bottomW/2,bRy=shape==="round"?bRx:bottomH/2,tRx=topW/2,tRy=shape==="round"?tRx:topH/2;
+    const bh=basketHeight,sc=Math.min(W,H)/Math.max(Math.max(topW,bottomW)*1.2,bh*1.5)*0.52,pcx=W/2,pcy=H/2+bh*sc*0.06,rx=rot.current.x,ry=rot.current.y;
+    const proj=(x,y,z)=>{const cy2=Math.cos(ry),sy2=Math.sin(ry),x1=x*cy2-z*sy2,z1=x*sy2+z*cy2,cx2=Math.cos(rx),sx2=Math.sin(rx),y1=y*cx2-z1*sx2,z2=y*sx2+z1*cx2,fv=800/(800+z2*sc+350);return{sx:pcx+x1*sc*fv,sy:pcy+y1*sc*fv};};
+    const sp=(brx,bry,a)=>{if(shape==="rect"){const cos=Math.cos(a),sin=Math.sin(a),s=Math.min(Math.abs(cos)>1e-9?Math.abs(brx/cos):1e9,Math.abs(sin)>1e-9?Math.abs(bry/sin):1e9);return{x:cos*s,z:sin*s};}return{x:brx*Math.cos(a),z:bry*Math.sin(a)};};
+    const wAt=t=>{if(bendType==="vase"){const d=Math.abs(t-.5);return waistRatio+(1-waistRatio)*(d/.5)**1.8;}if(bendType==="bulge"){const d=Math.abs(t-.5);return 1+(bulgeRatio-1)*(1-(d/.5)**2);}return 1;};
+    ctx.save();ctx.beginPath();for(let i=0;i<=64;i++){const a=(i/64)*Math.PI*2,r=sp(bRx,bRy,a),pp=proj(r.x,bh/2,r.z);i===0?ctx.moveTo(pp.sx,pp.sy):ctx.lineTo(pp.sx,pp.sy);}ctx.closePath();ctx.fillStyle="#7a4208";ctx.fill();ctx.strokeStyle="#3a1600";ctx.lineWidth=1.5;ctx.stroke();ctx.restore();
+    ctx.save();ctx.beginPath();for(let i=0;i<=80;i++){const a=(i/80)*Math.PI*2,r=sp(tRx,tRy,a),pp=proj(r.x,-bh/2,r.z);i===0?ctx.moveTo(pp.sx,pp.sy):ctx.lineTo(pp.sx,pp.sy);}ctx.closePath();ctx.strokeStyle="#6a3010";ctx.lineWidth=Math.max(3,ringThickness*sc*0.04);ctx.stroke();ctx.restore();
+    for(let i=0;i<slotCount;i++){const a=(i/slotCount)*Math.PI*2,dot=Math.cos(a-ry);ctx.save();ctx.globalAlpha=dot>0?1:0.14;ctx.beginPath();for(let s=0;s<=24;s++){const t=s/24,pr=wAt(t),bend=bendType==="S"?bendAmount*Math.sin(t*Math.PI):0,cRx=bRx+(tRx-bRx)*t,cRy=bRy+(tRy-bRy)*t,r=sp(cRx*pr+bend,cRy*pr+bend,a),pp=proj(r.x,bh/2-t*bh,r.z);s===0?ctx.moveTo(pp.sx,pp.sy):ctx.lineTo(pp.sx,pp.sy);}ctx.strokeStyle=dot>0?"#C47A2B":"#6B3A0F";ctx.lineWidth=Math.max(1.5,matThick*sc*0.8);ctx.lineCap="round";ctx.stroke();ctx.restore();}
+  },[p,slotCount]);
+  useEffect(()=>{draw();},[draw]);
+  useEffect(()=>{let alive=true;const loop=()=>{if(!alive)return;if(!drag.current){rot.current.y+=0.007;draw();}raf.current=requestAnimationFrame(loop);};raf.current=requestAnimationFrame(loop);return()=>{alive=false;cancelAnimationFrame(raf.current);};},[draw]);
+  const dn=(x,y)=>{drag.current=true;last.current={x,y};};
+  const mv=(x,y)=>{if(!drag.current)return;rot.current.y+=(x-last.current.x)*0.012;rot.current.x=Math.max(-1.1,Math.min(1.1,rot.current.x+(y-last.current.y)*0.012));last.current={x,y};draw();};
+  const up=()=>{drag.current=false;};
+  return <canvas ref={ref} width={380} height={300} style={{width:"100%",borderRadius:12,cursor:"grab",display:"block"}} onMouseDown={e=>dn(e.clientX,e.clientY)} onMouseMove={e=>mv(e.clientX,e.clientY)} onMouseUp={up} onMouseLeave={up} onTouchStart={e=>dn(e.touches[0].clientX,e.touches[0].clientY)} onTouchMove={e=>{e.preventDefault();mv(e.touches[0].clientX,e.touches[0].clientY);}} onTouchEnd={up}/>;
+}
+
+function Sl({label,value,min,max,step=1,unit="mm",onChange}){
+  const dec=()=>onChange(Math.max(min,+(value-step).toFixed(2))),inc=()=>onChange(Math.min(max,+(value+step).toFixed(2)));
+  const btn={width:26,height:26,borderRadius:6,border:"1px solid #3a1a06",background:"#1a0a02",color:"#c08040",fontSize:16,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"};
+  return <div style={{marginBottom:8,display:"flex",alignItems:"center",gap:8}}>
+    <span style={{fontSize:10,color:"#8a6030",textTransform:"uppercase",letterSpacing:"0.05em",flex:1,minWidth:0}}>{label}</span>
+    <div style={{display:"flex",alignItems:"center",gap:4,flexShrink:0}}>
+      <button onClick={dec} style={btn}>‹</button>
+      <input type="number" min={min} max={max} step={step} value={value} onChange={e=>{const v=+e.target.value;if(!isNaN(v))onChange(Math.min(max,Math.max(min,v)));}} style={{width:50,textAlign:"center",background:"#1a0a02",border:"1px solid #3a1a06",borderRadius:6,color:"#f0c060",fontFamily:"monospace",fontWeight:700,fontSize:13,padding:"3px 2px",MozAppearance:"textfield"}}/>
+      <span style={{fontSize:10,color:"#7a5028",minWidth:16}}>{unit}</span>
+      <button onClick={inc} style={btn}>›</button>
+    </div>
+  </div>;
+}
+function Sec({children}){return <div style={{fontSize:9,color:"#705028",textTransform:"uppercase",letterSpacing:"0.12em",borderBottom:"1px solid #2a1004",paddingBottom:3,marginBottom:8,marginTop:10}}>{children}</div>;}
+function BG({options,value,onChange}){return <div style={{display:"flex",gap:3,marginBottom:10,flexWrap:"wrap"}}>{options.map(o=><button key={String(o.id)} onClick={()=>onChange(o.id)} style={{flex:1,minWidth:52,padding:"6px 3px",borderRadius:6,border:"none",cursor:"pointer",fontSize:11,fontWeight:600,background:value===o.id?"#b06818":"#221006",color:value===o.id?"#fff":"#8a6030"}}>{o.label}</button>)}</div>;}
+function Toggle({label,value,onChange}){return <div style={{marginBottom:8,display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:10,color:"#8a6030",textTransform:"uppercase",letterSpacing:"0.05em",flex:1}}>{label}</span><button onClick={()=>onChange(!value)} style={{padding:"4px 12px",borderRadius:6,border:"1px solid #3a1a06",background:value?"#6a3010":"#1a0a02",color:value?"#f0c060":"#7a5028",fontSize:11,fontWeight:700,cursor:"pointer"}}>{value?"✓ Zapnuto":"Vypnuto"}</button></div>;}
+
+const QR_DONATE="data:image/png;base64,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";
+
+const DEF={shape:"round",bottomW:250,bottomH:180,topW:250,topH:180,basketHeight:100,matThick:3,
+  bendType:"straight",bendAmount:14,waistRatio:0.6,bulgeRatio:1.35,puzzleJoint:false,slotOrient:"tan",
+  // v UI
+  ringThickness:10,staveWidth:10,kerf:0.2,manualCount:false,staveCountManual:23};
+
+function App(){
+  const [p,setP]=useState(DEF),[tab,setTab]=useState("3d"),[svg,setSvg]=useState({svg:""}),[donate,setDonate]=useState(false);
+  const set=k=>v=>setP(prev=>({...prev,[k]:v}));
+  const tnwA=p.staveWidth;
+  const slotLen=(p.slotOrient==="rad"?p.matThick:tnwA)-p.kerf;
+  const autoCount=calcSlotCount(p.shape,p.bottomW,p.bottomH,p.topW,p.topH,p.staveWidth,slotLen);
+  const slotCount=p.manualCount?p.staveCountManual:autoCount;
+  useEffect(()=>{setSvg(generateSVG(p,slotCount));},[p,slotCount]);
+  const dl=(content,name,type)=>{const b64=btoa(unescape(encodeURIComponent(content)));const a=document.createElement("a");a.href=`data:${type};base64,${b64}`;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);};
+  const isRound=p.shape==="round";
+  const tnw=p.staveWidth,tl=p.matThick,totalH=p.basketHeight+tl*2;
+  // aktuální mezera mezi sloty (hrana–hrana) na středním obvodu
+  const _bRx=p.bottomW/2,_bRy=isRound?_bRx:p.bottomH/2,_tRx=p.topW/2,_tRy=isRound?_tRx:p.topH/2;
+  const _aRx=(_bRx+_tRx)/2,_aRy=(_bRy+_tRy)/2;
+  const _perim=p.shape==="rect"?2*(_aRx*2+_aRy*2):p.shape==="round"?2*Math.PI*_aRx:Math.PI*(3*(_aRx+_aRy)-Math.sqrt((3*_aRx+_aRy)*(_aRx+3*_aRy)));
+  const slotLenCur=(p.slotOrient==="rad"?p.matThick:tnw)-p.kerf;
+  const gapStaves=(_perim/slotCount-tnw).toFixed(1);   // mezera mezi sloupky
+  const gapSlots=(_perim/slotCount-slotLenCur).toFixed(1); // mezera mezi sloty
+
+  return <div style={{minHeight:"100vh",background:"#0c0601",color:"#ddc898",fontFamily:"Georgia,serif"}}>
+    <header style={{background:"rgba(0,0,0,0.8)",borderBottom:"1px solid #2e1406",padding:"10px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
+      <div><div style={{fontSize:16,fontWeight:700,color:"#e8b030"}}>🧺 Generátor košíků</div><div style={{fontSize:9,color:"#6a4820"}}>Vzory pro laserovou řezačku · mm</div></div>
+      <div style={{display:"flex",gap:6}}>
+        <button onClick={()=>setDonate(d=>!d)} style={{padding:"6px 11px",borderRadius:7,border:"1px solid #5a3a10",cursor:"pointer",fontSize:11,fontWeight:700,background:"#3a2408",color:"#f0c060"}}>☕ Podpořit</button>
+        <button onClick={()=>dl(svg.svg,"kosik.svg","image/svg+xml")} style={{padding:"6px 11px",borderRadius:7,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,background:"#183616",color:"#80c880"}}>↓ SVG</button>
+        <button onClick={()=>dl(toDXF(svg.svg),"kosik.dxf","application/dxf")} style={{padding:"6px 11px",borderRadius:7,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,background:"#162436",color:"#80a8c8"}}>↓ DXF</button>
+      </div>
+    </header>
+    {donate&&<div style={{margin:"10px 12px 0",background:"rgba(0,0,0,0.45)",border:"1px solid #5a3a10",borderRadius:12,padding:14,textAlign:"center"}}>
+      <div style={{fontSize:13,fontWeight:700,color:"#e8b030",marginBottom:8}}>☕ Podpořit vývoj generátoru</div>
+      <img src={QR_DONATE} alt="Platba QR kódem" style={{width:210,height:210,borderRadius:10,background:"#fff",display:"block",margin:"0 auto"}}/>
+      <div style={{fontSize:11,color:"#c09040",marginTop:8}}>QR kód pro příspěvek 50 Kč</div>
+      <div style={{fontSize:11,color:"#c09040",marginTop:4}}>Nebo libovolná částka na účet:<br/><span style={{fontFamily:"monospace",color:"#f0c060",fontWeight:700,fontSize:13}}>670100-2219505424/6210</span></div>
+      <button onClick={()=>setDonate(false)} style={{marginTop:10,padding:"6px 16px",borderRadius:7,border:"1px solid #5a3a10",background:"#221006",color:"#c09040",fontSize:11,cursor:"pointer"}}>Zavřít</button>
+    </div>}
+    <div style={{display:"flex",gap:4,padding:"10px 12px 0"}}>
+      {[["3d","🧺 3D"],["pattern","📐 Vzory"]].map(([id,lbl])=>(
+        <button key={id} onClick={()=>setTab(id)} style={{flex:1,padding:"7px 4px",borderRadius:7,border:"none",cursor:"pointer",fontSize:11,fontWeight:600,background:tab===id?"#b06818":"#221006",color:tab===id?"#fff":"#8a6030"}}>{lbl}</button>
+      ))}
+    </div>
+    <div style={{padding:"10px 12px"}}>
+      {tab==="3d"&&<div style={{background:"#070401",borderRadius:12,border:"1px solid #2e1406",padding:8,marginBottom:12}}><Canvas3D p={p} slotCount={slotCount}/><p style={{fontSize:10,color:"#3a2818",textAlign:"center",margin:"4px 0 0"}}>Táhněte pro otočení</p></div>}
+      {tab==="pattern"&&<div style={{marginBottom:12}}>
+        <div style={{background:"#fff",borderRadius:10,overflow:"auto",border:"2px solid #2e1406",maxHeight:"52vh"}}><div dangerouslySetInnerHTML={{__html:svg.svg}}/></div>
+        <div style={{marginTop:8,display:"flex",gap:8}}>
+          <button onClick={()=>dl(svg.svg,"kosik.svg","image/svg+xml")} style={{flex:1,padding:"9px",borderRadius:8,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,background:"#183616",color:"#80c880"}}>↓ SVG</button>
+          <button onClick={()=>dl(toDXF(svg.svg),"kosik.dxf","application/dxf")} style={{flex:1,padding:"9px",borderRadius:8,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,background:"#162436",color:"#80a8c8"}}>↓ DXF</button>
+        </div>
+      </div>}
+      <div style={{background:"rgba(0,0,0,0.3)",borderRadius:12,border:"1px solid #2e1406",padding:"12px 13px"}}>
+        <Sec>Tvar košíku</Sec>
+        <BG options={[{id:"oval",label:"Ovál"},{id:"round",label:"Kruh"},{id:"rect",label:"Hranol"}]} value={p.shape} onChange={set("shape")}/>
+        <Sec>Styl sloupků</Sec>
+        <BG options={[{id:"straight",label:"Rovný"},{id:"S",label:"S-ohyb"}]} value={p.bendType} onChange={set("bendType")}/>
+        {p.bendType==="S"&&<Sl label="Prohnutí" value={p.bendAmount} min={0} max={50} step={1} onChange={set("bendAmount")}/>}
+        <Sec>Rozměry dna</Sec>
+        <Sl label="Šířka" value={p.bottomW} min={60} max={500} step={5} onChange={set("bottomW")}/>
+        {!isRound&&<Sl label="Hloubka" value={p.bottomH} min={60} max={500} step={5} onChange={set("bottomH")}/>}
+        <Sec>Rozměry vršku</Sec>
+        <Sl label="Šířka" value={p.topW} min={60} max={500} step={5} onChange={set("topW")}/>
+        {!isRound&&<Sl label="Hloubka" value={p.topH} min={60} max={500} step={5} onChange={set("topH")}/>}
+        <Sec>Výška a materiál</Sec>
+        <Sl label="Výška sloupku (tělo)" value={p.basketHeight} min={40} max={400} step={5} onChange={set("basketHeight")}/>
+        <Sl label="Šířka sloupku" value={p.staveWidth} min={8} max={40} step={1} onChange={set("staveWidth")}/>
+        <Sl label="Šířka obruby" value={p.ringThickness} min={8} max={40} step={1} onChange={set("ringThickness")}/>
+        <Sl label="Tloušťka překližky" value={p.matThick} min={2} max={8} step={0.1} onChange={set("matThick")}/>
+        <Sl label="Prořez laseru (kerf)" value={p.kerf} min={0} max={1} step={0.05} onChange={set("kerf")}/>
+        <Sec>Počet sloupků</Sec>
+        <Toggle label="Nastavit ručně" value={p.manualCount} onChange={v=>{if(v)set("staveCountManual")(autoCount);set("manualCount")(v);}}/>
+        {p.manualCount&&<Sl label="Počet sloupků" value={p.staveCountManual} min={3} max={120} step={1} unit="ks" onChange={set("staveCountManual")}/>}
+        <div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
+          {slotCount}{p.shape==="rect"?" + 4 rohové":""} sloupků · mezera mezi sloupky {gapStaves}mm · mezera mezi sloty {gapSlots}mm{!p.manualCount?` (auto: ${autoCount} ks)`:""}
+        </div>
+        <Sec>Orientace slotů</Sec>
+        <BG options={[{id:"tan",label:"Naležato (po obvodu)"},{id:"rad",label:"Nastojato (kolmo)"}]} value={p.slotOrient} onChange={set("slotOrient")}/>
+        <div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
+          Sloty i čepy se dopočítají automaticky:<br/>
+          slot {(p.slotOrient==="rad"?(p.matThick-p.kerf):(tnw-p.kerf)).toFixed(1)}×{(p.slotOrient==="rad"?(tnw-p.kerf):(p.matThick-p.kerf)).toFixed(1)}mm · čep {tnw.toFixed(1)}×{p.matThick.toFixed(1)}mm
+        </div>
+        <Sec>Puzzle spoj horní obruby</Sec>
+        <Toggle label="Puzzle spoj (skládací)" value={p.puzzleJoint} onChange={set("puzzleJoint")}/>
+        <Sec>Přehled</Sec>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 10px",fontSize:11}}>
+          {[["Dno",`${p.bottomW}×${isRound?p.bottomW:p.bottomH}mm`],["Vršek",`${p.topW}×${isRound?p.topW:p.topH}mm`],["Výška těla",`${p.basketHeight}mm`],["Sloupek",`${totalH.toFixed(0)}mm`],["Čep",`${tnw.toFixed(1)}×${p.matThick}mm`],["Sloupků",`${slotCount}${p.shape==="rect"?"+4r":""} ks`]].map(([k,v])=>(
+            <div key={k} style={{display:"flex",justifyContent:"space-between",borderBottom:"1px solid #1e0c02",paddingBottom:3}}>
+              <span style={{color:"#7a5028"}}>{k}</span><span style={{color:"#f0c060",fontFamily:"monospace",fontWeight:600}}>{v}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
