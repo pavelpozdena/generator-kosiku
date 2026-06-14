@@ -4,6 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>🧺 Generátor košíků</title>
+<script data-goatcounter="https://generator-kosiku.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
@@ -211,25 +212,31 @@ function buildStave(cx,cy,sw,totalH,tnw,tl,bendType,bendAmt,waist,bulge,color){
   const chf=0.5, chh=1;   // sražení špičky čepu: 0,5 mm do strany, 1 mm na výšku (náběh)
   const t2=tnw/2, bodyTop=cy+tl, bodyBot=cy+totalH-tl;
   const wAt=t=>{if(bendType==="vase"){const d=Math.abs(t-.5);return waist+(1-waist)*(d/.5)**1.8;}if(bendType==="bulge"){const d=Math.abs(t-.5);return 1+(bulge-1)*(1-(d/.5)**2);}return 1;};
-  const bAt=t=>bendType==="S"?bendAmt*Math.sin(t*Math.PI):0;
+  // J-křivka s rovným náběhem u obou čepů: prvních a posledních ~12 % výšky jde
+  // tělo svisle (kolmo do čepu), uprostřed plynulý oblív → čep navazuje rovně.
+  const ease=t=>{const e=0.12; if(t<e)return 0; if(t>1-e)return 1; const u=(t-e)/(1-2*e); return (1-Math.cos(u*Math.PI))/2;};
+  const bAt=t=>bendType==="S"?bendAmt*ease(t):0;
   const steps=30,Rt=[],Lt=[];
   for(let i=0;i<=steps;i++){const t=i/steps,yy=bodyTop+ch+t*(bodyBot-bodyTop-2*ch),w=wAt(t)*sw/2,bx=bAt(t);Rt.push([cx+bx+w,yy]);Lt.push([cx+bx-w,yy]);}
+  const bTop=Rt.length?(Rt[0][0]+Lt[0][0])/2-cx:0;        // posun těla u horního čepu
+  const bBot=Rt.length?(Rt[steps][0]+Lt[steps][0])/2-cx:0; // posun těla u dolního čepu
+  const uT=cx+bTop, uB=cx+bBot;                            // osy horního a dolního čepu
   const pts=[
-    [cx-t2+chf,cy],[cx+t2-chf,cy],[cx+t2,cy+chh],[cx+t2,bodyTop],[cx+cw/2,bodyTop],
+    [uT-t2+chf,cy],[uT+t2-chf,cy],[uT+t2,cy+chh],[uT+t2,bodyTop],[uT+cw/2,bodyTop],
     ...Rt,
-    [cx+cw/2,bodyBot],[cx+t2,bodyBot],[cx+t2,cy+totalH-chh],[cx+t2-chf,cy+totalH],
-    [cx-t2+chf,cy+totalH],[cx-t2,cy+totalH-chh],[cx-t2,bodyBot],[cx-cw/2,bodyBot],
+    [uB+cw/2,bodyBot],[uB+t2,bodyBot],[uB+t2,cy+totalH-chh],[uB+t2-chf,cy+totalH],
+    [uB-t2+chf,cy+totalH],[uB-t2,cy+totalH-chh],[uB-t2,bodyBot],[uB-cw/2,bodyBot],
     ...Lt.slice().reverse(),
-    [cx-cw/2,bodyTop],[cx-t2,bodyTop],[cx-t2,cy+chh]
+    [uT-cw/2,bodyTop],[uT-t2,bodyTop],[uT-t2,cy+chh]
   ];
   const d="M"+pts.map(q=>`${f(q[0])} ${f(q[1])}`).join(" L")+"Z";
   let svg=`<path d="${d}" fill="#ffe8d8" stroke="${color}" stroke-width="1"/>`;
   // dva pružné prořezy v každém čepu (řezné čáry, kerf vytvoří mezeru)
   const so=tnw*0.25, sl=tl;
-  svg+=`<path d="M${f(cx-so)} ${f(cy)} L${f(cx-so)} ${f(cy+sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
-  svg+=`<path d="M${f(cx+so)} ${f(cy)} L${f(cx+so)} ${f(cy+sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
-  svg+=`<path d="M${f(cx-so)} ${f(cy+totalH)} L${f(cx-so)} ${f(cy+totalH-sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
-  svg+=`<path d="M${f(cx+so)} ${f(cy+totalH)} L${f(cx+so)} ${f(cy+totalH-sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
+  svg+=`<path d="M${f(uT-so)} ${f(cy)} L${f(uT-so)} ${f(cy+sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
+  svg+=`<path d="M${f(uT+so)} ${f(cy)} L${f(uT+so)} ${f(cy+sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
+  svg+=`<path d="M${f(uB-so)} ${f(cy+totalH)} L${f(uB-so)} ${f(cy+totalH-sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
+  svg+=`<path d="M${f(uB+so)} ${f(cy+totalH)} L${f(uB+so)} ${f(cy+totalH-sl)}" fill="none" stroke="${color}" stroke-width="0.8"/>`;
   return svg;
 }
 
@@ -255,11 +262,12 @@ function generateSVG(p,slotCount){
   const bCX=M+bRx,bCY=M+bRy;
   parts.push(`<g><text x="${M}" y="${M-5}" font-size="9" fill="#999" font-family="sans-serif">Dno (1×) — ${bottomW}×${shape==="round"?bottomW:bottomH}mm</text>${buildBottom(bCX,bCY,bRx,bRy,shape,angles,botFracs,slotW,slotH,ringThickness,edgeOffsetBot,color)}</g>`);
   const tOffX=M+bottomW+30,tCX=tOffX+tRx,tCY=M+tRy;
-  parts.push(`<g><text x="${tOffX}" y="${M-5}" font-size="9" fill="#999" font-family="sans-serif">Horní obruba (1×)${puzzleJoint?" [puzzle]":""}</text>${buildTop(tCX,tCY,tRx,tRy,ringThickness,shape,angles,topFracs,slotW,slotH,edgeOffsetTop,color,puzzleJoint)}</g>`);
+  parts.push(`<g><text x="${tOffX}" y="${M-5}" font-size="9" fill="#999" font-family="sans-serif">Horní obruba (1×) — ${topW}×${shape==="round"?topW:topH}mm${puzzleJoint?" [puzzle]":""}</text>${buildTop(tCX,tCY,tRx,tRy,ringThickness,shape,angles,topFracs,slotW,slotH,edgeOffsetTop,color,puzzleJoint)}</g>`);
   const _aRx2=(bRx+tRx)/2,_aRy2=(bRy+tRy)/2;
   const _perim2=shape==="rect"?2*(_aRx2*2+_aRy2*2):shape==="round"?2*Math.PI*_aRx2:Math.PI*(3*(_aRx2+_aRy2)-Math.sqrt((3*_aRx2+_aRy2)*(_aRx2+3*_aRy2)));
   const _gapSlots=(_perim2/staveCount-Math.max(slotW,slotH)).toFixed(1);
-  const ringH=Math.max(bRy*2,tRy*2)+30,stavY=M+ringH+22,sp2=staveWidth*1.2+10,perRow=Math.max(1,Math.floor(900/sp2)),rows=Math.ceil(staveCount/perRow);
+  const bendW=bendType==="S"?Math.abs(bendAmount):0;       // vyklonění přidá k šířce sloupku
+  const ringH=Math.max(bRy*2,tRy*2)+30,stavY=M+ringH+22,sp2=staveWidth*1.2+bendW+12,perRow=Math.max(1,Math.floor(1000/sp2)),rows=Math.ceil(staveCount/perRow);
   parts.push(`<text x="${M}" y="${stavY-7}" font-size="9" fill="#999" font-family="sans-serif">Sloupky (${staveCount}×) — výška ${totalH.toFixed(0)}mm, čep ${tnw.toFixed(1)}×${matThick.toFixed(1)}mm, sloty ${_gapSlots}mm od sebe</text>`);
   for(let i=0;i<staveCount;i++){const col=i%perRow,row=Math.floor(i/perRow);parts.push(buildStave(M+col*sp2+sp2/2,stavY+row*(totalH+14),staveWidth,totalH,tnw,tl,bendType,bendAmount,waistRatio,bulgeRatio,color));}
   let totalW=Math.max(tOffX+topW+M,perRow*sp2+M*2),totalH2=stavY+rows*(totalH+14)+M;
@@ -312,7 +320,7 @@ function Canvas3D({p,slotCount}){
     const wAt=t=>{if(bendType==="vase"){const d=Math.abs(t-.5);return waistRatio+(1-waistRatio)*(d/.5)**1.8;}if(bendType==="bulge"){const d=Math.abs(t-.5);return 1+(bulgeRatio-1)*(1-(d/.5)**2);}return 1;};
     ctx.save();ctx.beginPath();for(let i=0;i<=64;i++){const a=(i/64)*Math.PI*2,r=sp(bRx,bRy,a),pp=proj(r.x,bh/2,r.z);i===0?ctx.moveTo(pp.sx,pp.sy):ctx.lineTo(pp.sx,pp.sy);}ctx.closePath();ctx.fillStyle="#7a4208";ctx.fill();ctx.strokeStyle="#3a1600";ctx.lineWidth=1.5;ctx.stroke();ctx.restore();
     ctx.save();ctx.beginPath();for(let i=0;i<=80;i++){const a=(i/80)*Math.PI*2,r=sp(tRx,tRy,a),pp=proj(r.x,-bh/2,r.z);i===0?ctx.moveTo(pp.sx,pp.sy):ctx.lineTo(pp.sx,pp.sy);}ctx.closePath();ctx.strokeStyle="#6a3010";ctx.lineWidth=Math.max(3,ringThickness*sc*0.04);ctx.stroke();ctx.restore();
-    for(let i=0;i<slotCount;i++){const a=(i/slotCount)*Math.PI*2,dot=Math.cos(a-ry);ctx.save();ctx.globalAlpha=dot>0?1:0.14;ctx.beginPath();for(let s=0;s<=24;s++){const t=s/24,pr=wAt(t),bend=bendType==="S"?bendAmount*Math.sin(t*Math.PI):0,cRx=bRx+(tRx-bRx)*t,cRy=bRy+(tRy-bRy)*t,r=sp(cRx*pr+bend,cRy*pr+bend,a),pp=proj(r.x,bh/2-t*bh,r.z);s===0?ctx.moveTo(pp.sx,pp.sy):ctx.lineTo(pp.sx,pp.sy);}ctx.strokeStyle=dot>0?"#C47A2B":"#6B3A0F";ctx.lineWidth=Math.max(1.5,matThick*sc*0.8);ctx.lineCap="round";ctx.stroke();ctx.restore();}
+    for(let i=0;i<slotCount;i++){const a=(i/slotCount)*Math.PI*2,dot=Math.cos(a-ry);ctx.save();ctx.globalAlpha=dot>0?1:0.14;ctx.beginPath();for(let s=0;s<=24;s++){const t=s/24,pr=wAt(t),bend=0,cRx=bRx+(tRx-bRx)*t,cRy=bRy+(tRy-bRy)*t,r=sp(cRx*pr+bend,cRy*pr+bend,a),pp=proj(r.x,bh/2-t*bh,r.z);s===0?ctx.moveTo(pp.sx,pp.sy):ctx.lineTo(pp.sx,pp.sy);}ctx.strokeStyle=dot>0?"#C47A2B":"#6B3A0F";ctx.lineWidth=Math.max(1.5,matThick*sc*0.8);ctx.lineCap="round";ctx.stroke();ctx.restore();}
   },[p,slotCount]);
   useEffect(()=>{draw();},[draw]);
   useEffect(()=>{let alive=true;const loop=()=>{if(!alive)return;if(!drag.current){rot.current.y+=0.007;draw();}raf.current=requestAnimationFrame(loop);};raf.current=requestAnimationFrame(loop);return()=>{alive=false;cancelAnimationFrame(raf.current);};},[draw]);
@@ -344,24 +352,35 @@ const QR_DONATE="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAaQAAAGkCAMAAABJk
 const DEF={shape:"round",bottomW:250,bottomH:180,topW:250,topH:180,basketHeight:100,matThick:3,
   bendType:"straight",bendAmount:14,waistRatio:0.6,bulgeRatio:1.35,puzzleJoint:false,slotOrient:"tan",
   // v UI
-  ringThickness:10,staveWidth:10,kerf:0.2,manualCount:false,staveCountManual:23};
+  ringThickness:10,staveWidth:10,kerf:0.2,manualCount:false,staveCountManual:23,flare:35};
 
 function App(){
   const [p,setP]=useState(DEF),[tab,setTab]=useState("3d"),[svg,setSvg]=useState({svg:""}),[donate,setDonate]=useState(false);
   const set=k=>v=>setP(prev=>({...prev,[k]:v}));
-  const tnwA=p.staveWidth;
-  const slotLen=(p.slotOrient==="rad"?p.matThick:tnwA)-p.kerf;
-  const autoCount=calcSlotCount(p.shape,p.bottomW,p.bottomH,p.topW,p.topH,p.staveWidth,slotLen);
+  // Režim "ošatka": vršek se dopočítá automaticky z prohnutí S-křivky
+  // (horní konec sloupku se vykloní ven o flare → vršek = dno + 2×flare).
+  const bowl=p.shape==="bowl";
+  const ep=(()=>{
+    if(!bowl)return p;
+    const flare=Math.round(p.basketHeight*0.4375);  // výška 80 → vyklonění 35 → vršek = dno+70
+    const d=p.bottomW;
+    return {...p,shape:"round",bottomW:d,bottomH:d,topW:d+2*flare,topH:d+2*flare,
+            bendType:"S",bendAmount:flare,slotOrient:"rad"};
+  })();
+  const tnwA=ep.staveWidth;
+  const slotLen=(ep.slotOrient==="rad"?ep.matThick:tnwA)-ep.kerf;
+  const autoCount=calcSlotCount(ep.shape,ep.bottomW,ep.bottomH,ep.topW,ep.topH,ep.staveWidth,slotLen);
   const slotCount=p.manualCount?p.staveCountManual:autoCount;
-  useEffect(()=>{setSvg(generateSVG(p,slotCount));},[p,slotCount]);
-  const dl=(content,name,type)=>{const b64=btoa(unescape(encodeURIComponent(content)));const a=document.createElement("a");a.href=`data:${type};base64,${b64}`;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);};
-  const isRound=p.shape==="round";
+  useEffect(()=>{setSvg(generateSVG(ep,slotCount));},[ep,slotCount]);
+  const track=(path)=>{try{if(window.goatcounter&&window.goatcounter.count)window.goatcounter.count({path,title:path,event:true});}catch(e){}};
+  const dl=(content,name,type)=>{const b64=btoa(unescape(encodeURIComponent(content)));const a=document.createElement("a");a.href=`data:${type};base64,${b64}`;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);track(name.endsWith(".dxf")?"stazeni-dxf":name.endsWith(".svg")?"stazeni-svg":"stazeni-"+name);};
+  const isRound=ep.shape==="round"&&!bowl;
   const tnw=p.staveWidth,tl=p.matThick,totalH=p.basketHeight+tl*2;
   // aktuální mezera mezi sloty (hrana–hrana) na středním obvodu
-  const _bRx=p.bottomW/2,_bRy=isRound?_bRx:p.bottomH/2,_tRx=p.topW/2,_tRy=isRound?_tRx:p.topH/2;
+  const _bRx=ep.bottomW/2,_bRy=isRound?_bRx:ep.bottomH/2,_tRx=ep.topW/2,_tRy=isRound?_tRx:ep.topH/2;
   const _aRx=(_bRx+_tRx)/2,_aRy=(_bRy+_tRy)/2;
   const _perim=p.shape==="rect"?2*(_aRx*2+_aRy*2):p.shape==="round"?2*Math.PI*_aRx:Math.PI*(3*(_aRx+_aRy)-Math.sqrt((3*_aRx+_aRy)*(_aRx+3*_aRy)));
-  const slotLenCur=(p.slotOrient==="rad"?p.matThick:tnw)-p.kerf;
+  const slotLenCur=(ep.slotOrient==="rad"?ep.matThick:tnw)-ep.kerf;
   const gapStaves=(_perim/slotCount-tnw).toFixed(1);   // mezera mezi sloupky
   const gapSlots=(_perim/slotCount-slotLenCur).toFixed(1); // mezera mezi sloty
 
@@ -387,7 +406,7 @@ function App(){
       ))}
     </div>
     <div style={{padding:"10px 12px"}}>
-      {tab==="3d"&&<div style={{background:"#070401",borderRadius:12,border:"1px solid #2e1406",padding:8,marginBottom:12}}><Canvas3D p={p} slotCount={slotCount}/><p style={{fontSize:10,color:"#3a2818",textAlign:"center",margin:"4px 0 0"}}>Táhněte pro otočení</p></div>}
+      {tab==="3d"&&<div style={{background:"#070401",borderRadius:12,border:"1px solid #2e1406",padding:8,marginBottom:12}}><Canvas3D p={ep} slotCount={slotCount}/><p style={{fontSize:10,color:"#3a2818",textAlign:"center",margin:"4px 0 0"}}>Táhněte pro otočení</p></div>}
       {tab==="pattern"&&<div style={{marginBottom:12}}>
         <div style={{background:"#fff",borderRadius:10,overflow:"auto",border:"2px solid #2e1406",maxHeight:"52vh"}}><div dangerouslySetInnerHTML={{__html:svg.svg}}/></div>
         <div style={{marginTop:8,display:"flex",gap:8}}>
@@ -397,16 +416,25 @@ function App(){
       </div>}
       <div style={{background:"rgba(0,0,0,0.3)",borderRadius:12,border:"1px solid #2e1406",padding:"12px 13px"}}>
         <Sec>Tvar košíku</Sec>
-        <BG options={[{id:"oval",label:"Ovál"},{id:"round",label:"Kruh"},{id:"rect",label:"Hranol"}]} value={p.shape} onChange={set("shape")}/>
-        <Sec>Styl sloupků</Sec>
+        <BG options={[{id:"oval",label:"Ovál"},{id:"round",label:"Kruh"},{id:"rect",label:"Hranol"},{id:"bowl",label:"Ošatka"}]} value={p.shape} onChange={set("shape")}/>
+        {!bowl&&<><Sec>Styl sloupků</Sec>
         <BG options={[{id:"straight",label:"Rovný"},{id:"S",label:"S-ohyb"}]} value={p.bendType} onChange={set("bendType")}/>
-        {p.bendType==="S"&&<Sl label="Prohnutí" value={p.bendAmount} min={0} max={50} step={1} onChange={set("bendAmount")}/>}
+        {p.bendType==="S"&&<Sl label="Prohnutí" value={p.bendAmount} min={0} max={50} step={1} onChange={set("bendAmount")}/>}</>}
+        {bowl?<>
+          <Sec>Rozměry ošatky</Sec>
+          <Sl label="Průměr dna" value={p.bottomW} min={60} max={500} step={5} onChange={set("bottomW")}/>
+          <div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
+            Tvar sloupku i vršek se dopočítají z výšky:<br/>
+            vyklonění {Math.round(p.basketHeight*0.4375)} mm · vršek <b style={{color:"#f0c060"}}>⌀ {p.bottomW+2*Math.round(p.basketHeight*0.4375)} mm</b> · sloty kolmo
+          </div>
+        </>:<>
         <Sec>Rozměry dna</Sec>
         <Sl label="Šířka" value={p.bottomW} min={60} max={500} step={5} onChange={set("bottomW")}/>
         {!isRound&&<Sl label="Hloubka" value={p.bottomH} min={60} max={500} step={5} onChange={set("bottomH")}/>}
         <Sec>Rozměry vršku</Sec>
         <Sl label="Šířka" value={p.topW} min={60} max={500} step={5} onChange={set("topW")}/>
         {!isRound&&<Sl label="Hloubka" value={p.topH} min={60} max={500} step={5} onChange={set("topH")}/>}
+        </>}
         <Sec>Výška a materiál</Sec>
         <Sl label="Výška sloupku (tělo)" value={p.basketHeight} min={40} max={400} step={5} onChange={set("basketHeight")}/>
         <Sl label="Šířka sloupku" value={p.staveWidth} min={8} max={40} step={1} onChange={set("staveWidth")}/>
@@ -419,8 +447,8 @@ function App(){
         <div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
           {slotCount}{p.shape==="rect"?" + 4 rohové":""} sloupků · mezera mezi sloupky {gapStaves}mm · mezera mezi sloty {gapSlots}mm{!p.manualCount?` (auto: ${autoCount} ks)`:""}
         </div>
-        <Sec>Orientace slotů</Sec>
-        <BG options={[{id:"tan",label:"Naležato (po obvodu)"},{id:"rad",label:"Nastojato (kolmo)"}]} value={p.slotOrient} onChange={set("slotOrient")}/>
+        {!bowl&&<><Sec>Orientace slotů</Sec>
+        <BG options={[{id:"tan",label:"Naležato (po obvodu)"},{id:"rad",label:"Nastojato (kolmo)"}]} value={p.slotOrient} onChange={set("slotOrient")}/></>}
         <div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
           Sloty i čepy se dopočítají automaticky:<br/>
           slot {(p.slotOrient==="rad"?(p.matThick-p.kerf):(tnw-p.kerf)).toFixed(1)}×{(p.slotOrient==="rad"?(tnw-p.kerf):(p.matThick-p.kerf)).toFixed(1)}mm · čep {tnw.toFixed(1)}×{p.matThick.toFixed(1)}mm
