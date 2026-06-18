@@ -16,6 +16,135 @@
 const {useState,useRef,useEffect,useCallback}=React;
 
 function ellipsePt(cx,cy,rx,ry,a){return{x:cx+rx*Math.cos(a),y:cy+ry*Math.sin(a)};}
+
+// ── Srdce ── srdcová křivka, vepsaná do rx×ry. Dolní hrot i horní prohlubeň
+// jsou seříznuté na rovnou vodorovnou hranu (jako u referenčního košíku).
+function heartRaw(t){
+  const x=16*Math.pow(Math.sin(t),3);
+  const y=13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t);
+  return {x, y};
+}
+const _hb=(()=>{let minX=1e9,maxX=-1e9,minY=1e9,maxY=-1e9;for(let i=0;i<=720;i++){const p=heartRaw(i/720*Math.PI*2);minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);minY=Math.min(minY,p.y);maxY=Math.max(maxY,p.y);}return{minX,maxX,minY,maxY,cx:(minX+maxX)/2,cy:(minY+maxY)/2,w:maxX-minX,h:maxY-minY};})();
+// seříznutí v normalizovaných souřadnicích (ny: -1 nahoře/laloky .. +1 dole/hrot)
+const HEART_CUT_BOT=8, HEART_CUT_NOTCH=16;   // mm seříznutí (přepočítá se podle ry)
+function heartPt(cx,cy,rx,ry,t){
+  const p=heartRaw(t);
+  let nx=(p.x-_hb.cx)/(_hb.w/2);
+  let ny=(p.y-_hb.cy)/(_hb.h/2);             // -1..1
+  // y v mm od středu (kladné dolů)
+  let ax=cx+nx*rx, ay=cy-ny*ry;
+  // dolní hrot: y nesmí přesáhnout (cy+ry - cut)
+  const botLimit=cy+ry-HEART_CUT_BOT;
+  if(ay>botLimit)ay=botLimit;
+  // horní prohlubeň: jen v centrální oblasti (|x|<55% rx) srovnat na rovnou hranu
+  // dno prohlubně je nahoře (ay malé). Spočítáme úroveň prohlubně a posuneme ji výš o cut.
+  return {x:ax, y:ay};
+}
+function heartNormal(cx,cy,rx,ry,t){
+  const e=0.0015,a=heartPt(cx,cy,rx,ry,t-e),b=heartPt(cx,cy,rx,ry,t+e);
+  const tx=b.x-a.x,ty=b.y-a.y,len=Math.hypot(tx,ty)||1;
+  return {nx:ty/len, ny:-tx/len};  // vnější normála
+}
+// Body obrysu srdce se seříznutou horní prohlubní (dolní hrot řeší clamp v heartPt).
+// Vrací pole {x,y} po obvodu (uzavřené), s rovnou hranou v prohlubni.
+function heartOutline(cx,cy,rx,ry,N=360){
+  const raw=[];for(let i=0;i<=N;i++){const t=(i/N)*Math.PI*2;raw.push(heartPt(cx,cy,rx,ry,t));}
+  // úroveň prohlubně: dno výkroje = nejvyšší y (největší) mezi body s malým |x| v horní půlce
+  const centerUp=raw.filter(p=>Math.abs(p.x-cx)<rx*0.04 && p.y<cy);
+  if(!centerUp.length)return raw;
+  const notchBottom=Math.max(...centerUp.map(p=>p.y));      // dno prohlubně (nejníž v horní části)
+  const cutY=notchBottom-HEART_CUT_NOTCH*(ry/75);           // rovná hrana o kus výš
+  // ořízni: body v centrální oblasti pod hranou (y>cutY) nahraď rovnou hranou
+  const out=[];let prev=null;
+  for(const cur of raw){
+    const central=Math.abs(cur.x-cx)<rx*0.55 && cur.y<cy;   // jen horní střed
+    if(prev){
+      const pc=Math.abs(prev.x-cx)<rx*0.55 && prev.y<cy;
+      if((prev.y>cutY)!==(cur.y>cutY) && (central||pc)){
+        // průsečík s rovnou hranou
+        const u=(cutY-prev.y)/(cur.y-prev.y);
+        if(u>=0&&u<=1)out.push({x:prev.x+u*(cur.x-prev.x),y:cutY});
+      }
+    }
+    if(!(central && cur.y>cutY))out.push(cur);
+    prev=cur;
+  }
+  return out;
+}
+// Vnitřní obrys srdce = vnější odsazený dovnitř o konstantní vzdálenost `d` (konstantní šířka obruby).
+function pathHeartInset(cx,cy,rx,ry,d,N=360){
+  const o=heartOutline(cx,cy,rx,ry,N);
+  const M=o.length;
+  let inner=[];
+  for(let i=0;i<M;i++){
+    const a=o[(i-1+M)%M],b=o[(i+1)%M];
+    const tx=b.x-a.x,ty=b.y-a.y,len=Math.hypot(tx,ty)||1;
+    let nx=ty/len,ny=-tx/len;
+    if((o[i].x-cx)*nx+(o[i].y-cy)*ny>0){nx=-nx;ny=-ny;}
+    inner.push({x:o[i].x+nx*d, y:o[i].y+ny*d, ox:o[i].x, oy:o[i].y});
+  }
+  const tipY=Math.max(...o.map(p=>p.y));        // dolní špička
+  const cutY=tipY-d*1.6;                         // nad špičkou: čistá rovná hrana vnitřku
+  // Postav vnitřní obrys: body nad cutY ponech, úsek u špičky nahraď rovnou hranou.
+  // Najdi, kde obrys vstupuje pod cutY (pravá strana) a kde vystupuje (levá strana).
+  const out=[];let prev=null;
+  for(let i=0;i<=M;i++){
+    const cur=inner[i%M];
+    if(prev){
+      const cross=(prev.y>cutY)!==(cur.y>cutY);
+      if(cross){
+        const u=(cutY-prev.y)/(cur.y-prev.y);
+        if(u>=0&&u<=1)out.push({x:prev.x+u*(cur.x-prev.x),y:cutY});
+      }
+    }
+    if(cur.y<=cutY)out.push({x:cur.x,y:cur.y});
+    prev=cur;
+  }
+  let path="M"+out[0].x.toFixed(2)+" "+out[0].y.toFixed(2)+" ";
+  for(let i=1;i<out.length;i++)path+="L"+out[i].x.toFixed(2)+" "+out[i].y.toFixed(2)+" ";
+  return path+"Z";
+}
+function pathHeart(cx,cy,rx,ry,N=360){
+  const o=heartOutline(cx,cy,rx,ry,N);
+  let d="M"+o[0].x.toFixed(2)+" "+o[0].y.toFixed(2)+" ";
+  for(let i=1;i<o.length;i++)d+="L"+o[i].x.toFixed(2)+" "+o[i].y.toFixed(2)+" ";
+  return d+"Z";
+}
+function heartPerim(rx,ry,N=360){const o=heartOutline(0,0,rx,ry,N);let L=0;for(let i=1;i<o.length;i++)L+=Math.hypot(o[i].x-o[i-1].x,o[i].y-o[i-1].y);return L;}
+// Rozmístí n slotů po obrysu srdce. Slot v horní prohlubni (PŘESNĚ na ose) ANO,
+// dolní hrana volná. Symetricky kolem svislé osy, rovnoměrně po délce.
+function heartSlotPoints(cx,cy,rx,ry,n,N=720){
+  const o=heartOutline(cx,cy,rx,ry,N);
+  const M=o.length;
+  // úroveň horní rovné hrany (prohlubeň): mezi body NEJBLÍŽ ose vezmi ten nejníže (max y),
+  // to je dno seříznuté prohlubně (ne vrcholy laloků, které jsou výš = menší y)
+  const axisPts=o.filter(p=>p.y<cy&&Math.abs(p.x-cx)<rx*0.16);
+  const notchY=axisPts.length?Math.max(...axisPts.map(p=>p.y)):Math.min(...o.map(p=>p.y));
+  // index bodu obrysu nejblíž prohlubni na ose
+  let notchI=0,bd=1e9;for(let i=0;i<M;i++){const d=Math.abs(o[i].x-cx)+Math.abs(o[i].y-notchY);if(o[i].y<cy&&d<bd){bd=d;notchI=i;}}
+  // kumulativní délka po celém obrysu od notchI
+  const ord=[];for(let i=0;i<M;i++)ord.push(o[(notchI+i)%M]);
+  ord.push(ord[0]);
+  const dist=[0];for(let i=1;i<ord.length;i++)dist.push(dist[i-1]+Math.hypot(ord[i].x-ord[i-1].x,ord[i].y-ord[i-1].y));
+  const total=dist[dist.length-1];
+  const ptAtS=(s)=>{s=((s%total)+total)%total;let i=0;while(i<dist.length-1&&dist[i+1]<s)i++;const a=ord[i],b=ord[i+1]||ord[i];const seg=(dist[i+1]||total)-dist[i];const u=seg>0?(s-dist[i])/seg:0;return{x:a.x+u*(b.x-a.x),y:a.y+u*(b.y-a.y)};};
+  const normAtS=(s)=>{const e=Math.max(0.5,total/400);const p0=ptAtS(s-e),p1=ptAtS(s+e);const tx=p1.x-p0.x,ty=p1.y-p0.y,len=Math.hypot(tx,ty)||1;let nx=ty/len,ny=-tx/len;const mid=ptAtS(s);if((mid.x-cx)*nx+(mid.y-cy)*ny<0){nx=-nx;ny=-ny;}return{nx,ny};};
+  // najdi délkovou pozici dolní špičky (bod nejníž, max y) = konec pravé půlky
+  let tipS=total/2, bd2=1e9;
+  for(let s=0;s<total;s+=total/720){const p=ptAtS(s);const d=Math.abs(p.x-cx)+ (cy-p.y);/*chceme max y → min (cy-p.y)*/}
+  // přesněji: projdi a najdi s s největším y
+  {let by=-1e9;for(let s=0;s<total;s+=total/1440){const p=ptAtS(s);if(p.y>by){by=p.y;tipS=s;}}}
+  // prohlubeň přesně na ose, normála -1 → slotSVG ji posune dovnitř (dolů do srdce)
+  const pts=[{x:cx,y:notchY,nx:0,ny:-1}];
+  const half=Math.floor((n-1)/2);
+  for(let k=1;k<=half;k++){
+    const s=(k/(half+0.5))*tipS;          // rovnoměrně od prohlubně k dolní špici (po pravé straně)
+    const p=ptAtS(s),nm=normAtS(s);
+    pts.push({x:p.x,y:p.y,nx:nm.nx,ny:nm.ny});
+    pts.push({x:2*cx-p.x,y:p.y,nx:-nm.nx,ny:nm.ny});
+  }
+  return pts;
+}
 function pathEllipse(cx,cy,rx,ry,N=120){let d="";for(let i=0;i<=N;i++){const a=(i/N)*Math.PI*2,p=ellipsePt(cx,cy,rx,ry,a);d+=(i===0?"M":"L")+` ${p.x.toFixed(2)} ${p.y.toFixed(2)} `;}return d+"Z";}
 function pathRect(cx,cy,rx,ry){const f=v=>v.toFixed(2);return `M${f(cx-rx)} ${f(cy-ry)} L${f(cx+rx)} ${f(cy-ry)} L${f(cx+rx)} ${f(cy+ry)} L${f(cx-rx)} ${f(cy+ry)}Z`;}
 function ellipseNormal(a,rx,ry){const nx0=Math.cos(a)/(rx*rx),ny0=Math.sin(a)/(ry*ry),len=Math.sqrt(nx0*nx0+ny0*ny0);return{nx:nx0/len,ny:ny0/len};}
@@ -26,11 +155,20 @@ function calcSlotCount(shape,bW,bH,tW,tH,staveWidth,slotLen){
   let perim;
   if(shape==="rect") perim=2*(aRx*2+aRy*2);
   else if(shape==="round") perim=2*Math.PI*aRx;
+  else if(shape==="heart") perim=heartPerim(aRx,aRy);
   else perim=Math.PI*(3*(aRx+aRy)-Math.sqrt((3*aRx+aRy)*(aRx+3*aRy)));
   // Pravidla: rozteč sloupků min. 35 mm (jinak šířka+20), vždy lichý počet (nahoru),
   // mezera mezi sloty (hrana–hrana) nikdy pod 1,6 cm.
   const pitch=Math.max(35,staveWidth+20);
   let n=Math.max(5,Math.ceil(perim/pitch));
+  if(shape==="heart"){
+    // srdce: cílová mezera mezi sloty ~20 mm (rozteč = šířka sloupku + 20 mm)
+    const heartPitch=staveWidth+17;          // rozteč → pro obvod ~570 vyjde 21 sloupků
+    let hn=Math.max(5,Math.round(perim/heartPitch));
+    if(hn%2===0)hn++;                        // lichý: 1 v prohlubni + symetrické páry
+    while(hn>5 && (perim/hn-slotLen)<14) hn-=2;   // mezera nesmí klesnout pod 14 mm
+    return Math.max(5,hn);
+  }
   if(n%2===0)n++;                                  // lichý, vždy nahoru
   while(n>3 && (perim/n-slotLen)<16) n-=2;         // tvrdá podmínka: mezera mezi sloty ≥ 16 mm
   if(n%2===0)n--;
@@ -65,7 +203,7 @@ function rectFracToPoint(cx,cy,rx,ry,si,frac){
 }
 
 function buildBottom(cx,cy,rx,ry,shape,angles,rectFracs,slotW,slotH,thick,offset,color){
-  const bodyD=shape==="rect"?pathRect(cx,cy,rx,ry):pathEllipse(cx,cy,rx,ry);
+  const bodyD=shape==="rect"?pathRect(cx,cy,rx,ry):shape==="heart"?pathHeart(cx,cy,rx,ry):pathEllipse(cx,cy,rx,ry);
   const body=`<path d="${bodyD}" fill="#ffe8d8" stroke="${color}" stroke-width="1.2"/>`;
   let slots="";
   if(shape==="rect"&&rectFracs){
@@ -76,11 +214,16 @@ function buildBottom(cx,cy,rx,ry,shape,angles,rectFracs,slotW,slotH,thick,offset
     const shift=D-(offset+aH/2);
     const corners=[{px:cx-rx,py:cy-ry,nx1:-1,ny1:-1},{px:cx+rx,py:cy-ry,nx1:1,ny1:-1},{px:cx+rx,py:cy+ry,nx1:1,ny1:1},{px:cx-rx,py:cy+ry,nx1:-1,ny1:1}];
     for(const{px,py,nx1,ny1}of corners)slots+=slotSVG(px-nx1*d2*shift,py-ny1*d2*shift,nx1*d2,ny1*d2,slotW,slotH,thick,offset,color);
+  } else if(shape==="heart"){
+    const sp=heartSlotPoints(cx,cy,rx,ry,angles.length);
+    for(const q of sp)slots+=slotSVG(q.x,q.y,q.nx,q.ny,slotW,slotH,thick,offset,color);
   } else {
     for(const a of angles){const p=ellipsePt(cx,cy,rx,ry,a),n=ellipseNormal(a,rx,ry);slots+=slotSVG(p.x,p.y,n.nx,n.ny,slotW,slotH,thick,offset,color);}
   }
   return body+slots;
 }
+
+
 
 function buildTop(cx,cy,oRx,oRy,thick,shape,angles,rectFracs,slotW,slotH,offset,color,puzzleJoint){
   const iRx=oRx-thick, iRy=oRy-thick;
@@ -96,6 +239,9 @@ function buildTop(cx,cy,oRx,oRy,thick,shape,angles,rectFracs,slotW,slotH,offset,
       const shift=D-(offset+aH/2);
       const corners=[{px:cx-oRx,py:cy-oRy,nx1:-1,ny1:-1},{px:cx+oRx,py:cy-oRy,nx1:1,ny1:-1},{px:cx+oRx,py:cy+oRy,nx1:1,ny1:1},{px:cx-oRx,py:cy+oRy,nx1:-1,ny1:1}];
       for(const{px,py,nx1,ny1}of corners)slots+=slotSVG(px-nx1*d2*shift,py-ny1*d2*shift,nx1*d2,ny1*d2,slotW,slotH,thick,offset,color);
+    } else if(shape==="heart"){
+      const sp=heartSlotPoints(cx,cy,oRx,oRy,angles.length);
+      for(const q of sp)slots+=slotSVG(q.x,q.y,q.nx,q.ny,slotW,slotH,thick,offset,color);
     } else {
       for(const a of angles){const p=ellipsePt(cx,cy,oRx,oRy,a),nn=ellipseNormal(a,oRx,oRy);slots+=slotSVG(p.x,p.y,nn.nx,nn.ny,slotW,slotH,thick,offset,color);}
     }
@@ -107,6 +253,9 @@ function buildTop(cx,cy,oRx,oRy,thick,shape,angles,rectFracs,slotW,slotH,offset,
     if(shape==="rect"){
       outerD=pathRect(cx,cy,oRx,oRy);
       innerD=`M${f(cx-iRx)} ${f(cy-iRy)} L${f(cx-iRx)} ${f(cy+iRy)} L${f(cx+iRx)} ${f(cy+iRy)} L${f(cx+iRx)} ${f(cy-iRy)}Z`;
+    } else if(shape==="heart"){
+      outerD=pathHeart(cx,cy,oRx,oRy);
+      innerD=pathHeartInset(cx,cy,oRx,oRy,thick);
     } else {
       outerD=pathEllipse(cx,cy,oRx,oRy);
       innerD=pathEllipse(cx,cy,iRx,iRy);
@@ -132,6 +281,32 @@ function buildTop(cx,cy,oRx,oRy,thick,shape,angles,rectFracs,slotW,slotH,offset,
     }
     yJ+=thick*0.15; // výrůstek míří k −y, posuň čáru o polovinu jeho přesahu
     iX=cx-iRx; iY=yJ; oX=cx-oRx; oY=yJ;
+  } else if(shape==="heart"){
+    // srdce: spoj KOLMO na obrys, umístěný do MEZERY mezi dva sousední sloty na pravém boku.
+    const ot=heartOutline(cx,cy,oRx,oRy,720);
+    const M2=ot.length;
+    // pozice slotů na obrubě
+    const sp=heartSlotPoints(cx,cy,oRx,oRy,angles.length);
+    // vyber dva sousední sloty na pravém boku (x>cx, blízko výšky středu) → spoj do jejich středu
+    const rightSlots=sp.filter(q=>q.x>cx+oRx*0.3).sort((a,b)=>a.y-b.y);
+    let mid;
+    if(rightSlots.length>=2){
+      // dvojice nejblíž výšce cy
+      let best=[rightSlots[0],rightSlots[1]],bd=1e9;
+      for(let i=0;i<rightSlots.length-1;i++){const my=(rightSlots[i].y+rightSlots[i+1].y)/2;const d0=Math.abs(my-cy);if(d0<bd){bd=d0;best=[rightSlots[i],rightSlots[i+1]];}}
+      mid={x:(best[0].x+best[1].x)/2,y:(best[0].y+best[1].y)/2};
+    } else {
+      mid={x:cx+oRx,y:cy};
+    }
+    // najdi bod obrysu nejblíž tomuto středu mezery
+    let bi=0,bd2=1e9;for(let i=0;i<M2;i++){const d=Math.hypot(ot[i].x-mid.x,ot[i].y-mid.y);if(d<bd2){bd2=d;bi=i;}}
+    const oP=ot[bi];
+    const a=ot[(bi-3+M2)%M2],b=ot[(bi+3)%M2];
+    const tx=b.x-a.x,ty=b.y-a.y,len=Math.hypot(tx,ty)||1;
+    let nx=ty/len,ny=-tx/len;
+    if((oP.x-cx)*nx+(oP.y-cy)*ny<0){nx=-nx;ny=-ny;}
+    oX=oP.x; oY=oP.y;
+    iX=oP.x-nx*thick; iY=oP.y-ny*thick;
   } else {
     let splitAng;
     {
@@ -197,8 +372,8 @@ function buildTop(cx,cy,oRx,oRy,thick,shape,angles,rectFracs,slotW,slotH,offset,
   // Konce leží PŘESNĚ na okrajích: [0,0] = bod vnitřní elipsy, [0,dlen] = bod vnější elipsy
   const puzzleCutPath="M"+loc.map(([lt,lr])=>{const g=PT(lr,lt);return `${f(g[0])},${f(g[1])}`;}).join(" L");
 
-  const outerD2=shape==="rect"?pathRect(cx,cy,oRx,oRy):pathEllipse(cx,cy,oRx,oRy);
-  const innerD2=shape==="rect"?pathRect(cx,cy,iRx,iRy):pathEllipse(cx,cy,iRx,iRy);
+  const outerD2=shape==="rect"?pathRect(cx,cy,oRx,oRy):shape==="heart"?pathHeart(cx,cy,oRx,oRy):pathEllipse(cx,cy,oRx,oRy);
+  const innerD2=shape==="rect"?pathRect(cx,cy,iRx,iRy):shape==="heart"?pathHeartInset(cx,cy,oRx,oRy,thick):pathEllipse(cx,cy,iRx,iRy);
   const ring=`<path d="${outerD2} ${innerD2}" fill-rule="evenodd" fill="#ffe8d8" stroke="${color}" stroke-width="1.2"/>`;
   const puzzleCut=`<path d="${puzzleCutPath}" fill="none" stroke="${color}" stroke-width="1.0" stroke-linecap="round" stroke-linejoin="round"/>`;
   return `<g>${ring}${puzzleCut}${makeSlots()}</g>`;
@@ -242,7 +417,7 @@ function buildStave(cx,cy,sw,totalH,tnw,tl,bendType,bendAmt,waist,bulge,color){
 
 function generateSVG(p,slotCount){
   const{shape,bottomW,bottomH,topW,topH,basketHeight,matThick,staveWidth,
-    bendType,bendAmount,waistRatio,bulgeRatio,ringThickness,kerf,puzzleJoint,slotOrient}=p;
+    bendType,bendAmount,waistRatio,bulgeRatio,ringThickness,kerf,puzzleJoint,slotOrient,lid}=p;
   const color="#cc2200";
   const bRx=bottomW/2,bRy=shape==="round"?bRx:bottomH/2,tRx=topW/2,tRy=shape==="round"?tRx:topH/2;
   // ── vše odvozeno z tloušťky překližky ──
@@ -276,6 +451,21 @@ function generateSVG(p,slotCount){
     parts.push(`<text x="${M}" y="${cY-5}" font-size="9" fill="#999" font-family="sans-serif">Rohové sloupky (4×)</text>`);
     for(let i=0;i<4;i++)parts.push(buildStave(M+i*sp2+sp2/2,cY,staveWidth,totalH,tnw,tl,"straight",0,1,1,color));
     totalH2=cY+totalH+M;
+  }
+  // ── Kroužek na obrubu (jen ovál/kruh) ── mezikruží, vnější = obruba, šířka = 3/4 obruby,
+  // BEZ slotů. Přilepí se na obrubu (zakryje sloty, zmenší otvor). Vyříznutý vnitřek slouží jako víko.
+  if(lid&&(shape==="round"||shape==="oval")){
+    const lidY=totalH2+10;
+    const oRx=tRx,oRy=tRy;
+    const ringW=ringThickness*0.75;                         // šířka kroužku = 3/4 obruby
+    const iRx=tRx-ringW,iRy=tRy-ringW;
+    const cxL=M+oRx,cyL=lidY+oRy;
+    const outerD=shape==="round"?pathEllipse(cxL,cyL,oRx,oRx):pathEllipse(cxL,cyL,oRx,oRy);
+    const innerD=shape==="round"?pathEllipse(cxL,cyL,iRx,iRx):pathEllipse(cxL,cyL,iRx,iRy);
+    parts.push(`<text x="${M}" y="${lidY-5}" font-size="9" fill="#999" font-family="sans-serif">Kroužek na obrubu (1×) — vnější ${(oRx*2).toFixed(0)}×${(oRy*2).toFixed(0)}, šířka ${ringW.toFixed(0)}mm · vnitřek = víko</text>`);
+    parts.push(`<path d="${outerD} ${innerD}" fill-rule="evenodd" fill="#ffe8d8" stroke="${color}" stroke-width="1.2"/>`);
+    totalH2=lidY+oRy*2+M;
+    totalW=Math.max(totalW,cxL+oRx+M);
   }
   return{svg:`<svg xmlns="http://www.w3.org/2000/svg" width="${totalW}" height="${totalH2}" viewBox="0 0 ${totalW} ${totalH2}" style="background:white">${parts.join("")}</svg>`};
 }
@@ -316,7 +506,7 @@ function Canvas3D({p,slotCount}){
     const bRx=bottomW/2,bRy=shape==="round"?bRx:bottomH/2,tRx=topW/2,tRy=shape==="round"?tRx:topH/2;
     const bh=basketHeight,sc=Math.min(W,H)/Math.max(Math.max(topW,bottomW)*1.2,bh*1.5)*0.52,pcx=W/2,pcy=H/2+bh*sc*0.06,rx=rot.current.x,ry=rot.current.y;
     const proj=(x,y,z)=>{const cy2=Math.cos(ry),sy2=Math.sin(ry),x1=x*cy2-z*sy2,z1=x*sy2+z*cy2,cx2=Math.cos(rx),sx2=Math.sin(rx),y1=y*cx2-z1*sx2,z2=y*sx2+z1*cx2,fv=800/(800+z2*sc+350);return{sx:pcx+x1*sc*fv,sy:pcy+y1*sc*fv};};
-    const sp=(brx,bry,a)=>{if(shape==="rect"){const cos=Math.cos(a),sin=Math.sin(a),s=Math.min(Math.abs(cos)>1e-9?Math.abs(brx/cos):1e9,Math.abs(sin)>1e-9?Math.abs(bry/sin):1e9);return{x:cos*s,z:sin*s};}return{x:brx*Math.cos(a),z:bry*Math.sin(a)};};
+    const sp=(brx,bry,a)=>{if(shape==="rect"){const cos=Math.cos(a),sin=Math.sin(a),s=Math.min(Math.abs(cos)>1e-9?Math.abs(brx/cos):1e9,Math.abs(sin)>1e-9?Math.abs(bry/sin):1e9);return{x:cos*s,z:sin*s};}if(shape==="heart"){const x=16*Math.pow(Math.sin(a),3),y=13*Math.cos(a)-5*Math.cos(2*a)-2*Math.cos(3*a)-Math.cos(4*a);return{x:(x/16)*brx,z:-(y/17)*bry};}return{x:brx*Math.cos(a),z:bry*Math.sin(a)};};
     const wAt=t=>{if(bendType==="vase"){const d=Math.abs(t-.5);return waistRatio+(1-waistRatio)*(d/.5)**1.8;}if(bendType==="bulge"){const d=Math.abs(t-.5);return 1+(bulgeRatio-1)*(1-(d/.5)**2);}return 1;};
     ctx.save();ctx.beginPath();for(let i=0;i<=64;i++){const a=(i/64)*Math.PI*2,r=sp(bRx,bRy,a),pp=proj(r.x,bh/2,r.z);i===0?ctx.moveTo(pp.sx,pp.sy):ctx.lineTo(pp.sx,pp.sy);}ctx.closePath();ctx.fillStyle="#7a4208";ctx.fill();ctx.strokeStyle="#3a1600";ctx.lineWidth=1.5;ctx.stroke();ctx.restore();
     ctx.save();ctx.beginPath();for(let i=0;i<=80;i++){const a=(i/80)*Math.PI*2,r=sp(tRx,tRy,a),pp=proj(r.x,-bh/2,r.z);i===0?ctx.moveTo(pp.sx,pp.sy):ctx.lineTo(pp.sx,pp.sy);}ctx.closePath();ctx.strokeStyle="#6a3010";ctx.lineWidth=Math.max(3,ringThickness*sc*0.04);ctx.stroke();ctx.restore();
@@ -352,20 +542,31 @@ const QR_DONATE="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAaQAAAGkCAMAAABJk
 const DEF={shape:"round",bottomW:250,bottomH:180,topW:250,topH:180,basketHeight:100,matThick:3,
   bendType:"straight",bendAmount:14,waistRatio:0.6,bulgeRatio:1.35,puzzleJoint:false,slotOrient:"tan",
   // v UI
-  ringThickness:10,staveWidth:10,kerf:0.2,manualCount:false,staveCountManual:23,flare:35};
+  ringThickness:10,staveWidth:10,kerf:0.2,manualCount:false,staveCountManual:23,flare:35,lid:false};
 
 function App(){
   const [p,setP]=useState(DEF),[tab,setTab]=useState("3d"),[svg,setSvg]=useState({svg:""}),[donate,setDonate]=useState(false);
-  const set=k=>v=>setP(prev=>({...prev,[k]:v}));
+  const set=k=>v=>setP(prev=>{
+    if(k==="shape"&&v==="heart"&&prev.shape!=="heart")
+      return {...prev,shape:"heart",bottomW:200,bottomH:150,topW:200,topH:150,basketHeight:80,staveWidth:10};
+    return {...prev,[k]:v};
+  });
   // Režim "ošatka": vršek se dopočítá automaticky z prohnutí S-křivky
   // (horní konec sloupku se vykloní ven o flare → vršek = dno + 2×flare).
   const bowl=p.shape==="bowl";
+  const heart=p.shape==="heart";
   const ep=(()=>{
-    if(!bowl)return p;
-    const flare=Math.round(p.basketHeight*0.4375);  // výška 80 → vyklonění 35 → vršek = dno+70
-    const d=p.bottomW;
-    return {...p,shape:"round",bottomW:d,bottomH:d,topW:d+2*flare,topH:d+2*flare,
-            bendType:"S",bendAmount:flare,slotOrient:"rad"};
+    if(bowl){
+      const flare=Math.round(p.basketHeight*0.4375);  // výška 80 → vyklonění 35 → vršek = dno+70
+      const d=p.bottomW;
+      return {...p,shape:"round",bottomW:d,bottomH:d,topW:d+2*flare,topH:d+2*flare,
+              bendType:"S",bendAmount:flare,slotOrient:"rad"};
+    }
+    if(heart){
+      // srdce: rovné svislé stěny (dno = vršek), rovné sloupky, sloty kolmo
+      return {...p,topW:p.bottomW,topH:p.bottomH,bendType:"straight",bendAmount:0,slotOrient:"tan"};
+    }
+    return p;
   })();
   const tnwA=ep.staveWidth;
   const slotLen=(ep.slotOrient==="rad"?ep.matThick:tnwA)-ep.kerf;
@@ -416,8 +617,8 @@ function App(){
       </div>}
       <div style={{background:"rgba(0,0,0,0.3)",borderRadius:12,border:"1px solid #2e1406",padding:"12px 13px"}}>
         <Sec>Tvar košíku</Sec>
-        <BG options={[{id:"oval",label:"Ovál"},{id:"round",label:"Kruh"},{id:"rect",label:"Hranol"},{id:"bowl",label:"Ošatka"}]} value={p.shape} onChange={set("shape")}/>
-        {!bowl&&<><Sec>Styl sloupků</Sec>
+        <BG options={[{id:"oval",label:"Ovál"},{id:"round",label:"Kruh"},{id:"rect",label:"Hranol"},{id:"bowl",label:"Ošatka"},{id:"heart",label:"Srdce"}]} value={p.shape} onChange={set("shape")}/>
+        {!bowl&&!heart&&<><Sec>Styl sloupků</Sec>
         <BG options={[{id:"straight",label:"Rovný"},{id:"S",label:"S-ohyb"}]} value={p.bendType} onChange={set("bendType")}/>
         {p.bendType==="S"&&<Sl label="Prohnutí" value={p.bendAmount} min={0} max={50} step={1} onChange={set("bendAmount")}/>}</>}
         {bowl?<>
@@ -426,6 +627,13 @@ function App(){
           <div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
             Tvar sloupku i vršek se dopočítají z výšky:<br/>
             vyklonění {Math.round(p.basketHeight*0.4375)} mm · vršek <b style={{color:"#f0c060"}}>⌀ {p.bottomW+2*Math.round(p.basketHeight*0.4375)} mm</b> · sloty kolmo
+          </div>
+        </>:heart?<>
+          <Sec>Rozměry srdce</Sec>
+          <Sl label="Šířka srdce" value={p.bottomW} min={80} max={500} step={5} onChange={set("bottomW")}/>
+          <Sl label="Výška srdce (rozměr)" value={p.bottomH} min={80} max={500} step={5} onChange={set("bottomH")}/>
+          <div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
+            Rovné svislé stěny (dno = vršek), sloty kolmo. Sloupek je v hrotu i v prohlubni.
           </div>
         </>:<>
         <Sec>Rozměry dna</Sec>
@@ -447,7 +655,7 @@ function App(){
         <div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
           {slotCount}{p.shape==="rect"?" + 4 rohové":""} sloupků · mezera mezi sloupky {gapStaves}mm · mezera mezi sloty {gapSlots}mm{!p.manualCount?` (auto: ${autoCount} ks)`:""}
         </div>
-        {!bowl&&<><Sec>Orientace slotů</Sec>
+        {!bowl&&!heart&&<><Sec>Orientace slotů</Sec>
         <BG options={[{id:"tan",label:"Naležato (po obvodu)"},{id:"rad",label:"Nastojato (kolmo)"}]} value={p.slotOrient} onChange={set("slotOrient")}/></>}
         <div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
           Sloty i čepy se dopočítají automaticky:<br/>
@@ -455,6 +663,13 @@ function App(){
         </div>
         <Sec>Puzzle spoj horní obruby</Sec>
         <Toggle label="Puzzle spoj (skládací)" value={p.puzzleJoint} onChange={set("puzzleJoint")}/>
+        {(p.shape==="oval"||p.shape==="round")&&<>
+          <Sec>Víko</Sec>
+          <Toggle label="Přidat kroužek na obrubu" value={p.lid} onChange={set("lid")}/>
+          {p.lid&&<div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
+            Kroužek (3/4 šířky obruby) se přilepí na obrubu a zakryje sloty. Vyříznutý vnitřek použiješ jako víko.
+          </div>}
+        </>}
         <Sec>Přehled</Sec>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 10px",fontSize:11}}>
           {[["Dno",`${p.bottomW}×${isRound?p.bottomW:p.bottomH}mm`],["Vršek",`${p.topW}×${isRound?p.topW:p.topH}mm`],["Výška těla",`${p.basketHeight}mm`],["Sloupek",`${totalH.toFixed(0)}mm`],["Čep",`${tnw.toFixed(1)}×${p.matThick}mm`],["Sloupků",`${slotCount}${p.shape==="rect"?"+4r":""} ks`]].map(([k,v])=>(
