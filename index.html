@@ -26,7 +26,7 @@ function heartRaw(t){
 }
 const _hb=(()=>{let minX=1e9,maxX=-1e9,minY=1e9,maxY=-1e9;for(let i=0;i<=720;i++){const p=heartRaw(i/720*Math.PI*2);minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);minY=Math.min(minY,p.y);maxY=Math.max(maxY,p.y);}return{minX,maxX,minY,maxY,cx:(minX+maxX)/2,cy:(minY+maxY)/2,w:maxX-minX,h:maxY-minY};})();
 // seříznutí v normalizovaných souřadnicích (ny: -1 nahoře/laloky .. +1 dole/hrot)
-const HEART_CUT_BOT=8, HEART_CUT_NOTCH=16;   // mm seříznutí (přepočítá se podle ry)
+const HEART_CUT_BOT=12, HEART_CUT_NOTCH=16;   // mm seříznutí (přepočítá se podle ry)
 function heartPt(cx,cy,rx,ry,t){
   const p=heartRaw(t);
   let nx=(p.x-_hb.cx)/(_hb.w/2);
@@ -187,9 +187,11 @@ function slotSVG(px,py,nx,ny,slotW,slotH,thick,offset,color){
 
 function makeSlotAngles(n){return Array.from({length:n},(_,i)=>(i/n)*Math.PI*2);}
 function makeRectSlotFracs(n,rx,ry,depth,offset,staveW=0){
-  const W=rx*2,H=ry*2,perim=2*(W+H),margin=Math.max(depth+offset+3,Math.min(rx,ry)*0.1)+staveW;
+  // Rovnoměrná rozteč po celém obvodu (i od rohů): každá strana se rozdělí na (cnt+1) stejných
+  // úseků, sloty na vnitřních dělicích bodech → vzdálenost roh→slot = rozteč slot→slot.
+  const W=rx*2,H=ry*2,perim=2*(W+H);
   const result=[],sideLens=[W,H,W,H],counts=sideLens.map(l=>Math.max(1,Math.round((l/perim)*n)));
-  for(let si=0;si<4;si++){const cnt=counts[si],usable=sideLens[si]-margin*2;if(usable<=0)continue;for(let i=0;i<cnt;i++){const t=cnt===1?0.5:i/(cnt-1);result.push({si,frac:(margin+t*usable)/sideLens[si]});}}
+  for(let si=0;si<4;si++){const cnt=counts[si];for(let i=0;i<cnt;i++){const frac=(i+1)/(cnt+1);result.push({si,frac});}}
   return result;
 }
 function rectFracToPoint(cx,cy,rx,ry,si,frac){
@@ -445,12 +447,65 @@ function buildStave(cx,cy,sw,totalH,tnw,tl,bendType,bendAmt,waist,bulge,color){
   return svg;
 }
 
+// Sdílený puzzle profil (krček + hlavička tvaru T). Vrací SVG path mezi vnitřním (iX,iY) a vnějším (oX,oY) bodem.
+function puzzleCutBetween(iX,iY,oX,oY,color){
+  const f=v=>v.toFixed(3);
+  const ddx=oX-iX, ddy=oY-iY, dlen=Math.sqrt(ddx*ddx+ddy*ddy)||1;
+  const nrx=ddx/dlen, nry=ddy/dlen, ntx=-nry, nty=nrx;
+  const PT=(lr,lt)=>[iX+lr*nrx+lt*ntx, iY+lr*nry+lt*nty];
+  const nw=Math.max(dlen*0.10,1.5), hw=Math.max(dlen*0.18,nw+1.2);
+  const tb=Math.max(dlen*0.12,1.5), hd=Math.max(dlen*0.18,2.5), rad=dlen*0.12, pos=dlen*0.50;
+  const quad=(p0,c,p1,n=8)=>{const o=[];for(let i=1;i<=n;i++){const t=i/n,u=1-t;o.push([u*u*p0[0]+2*u*t*c[0]+t*t*p1[0],u*u*p0[1]+2*u*t*c[1]+t*t*p1[1]]);}return o;};
+  const corner=[[0,0],[0,pos-nw],[tb,pos-nw],[tb,pos-hw],[tb+hd,pos-hw],[tb+hd,pos+hw],[tb,pos+hw],[tb,pos+nw],[0,pos+nw],[0,dlen]];
+  const loc=[corner[0]];
+  for(let i=1;i<corner.length-1;i++){
+    const A0=corner[i-1],B0=corner[i],C0=corner[i+1];
+    const l1=Math.hypot(B0[0]-A0[0],B0[1]-A0[1]),l2=Math.hypot(C0[0]-B0[0],C0[1]-B0[1]);
+    const rr=Math.min(rad,l1*0.45,l2*0.45);
+    const e1=[B0[0]+(A0[0]-B0[0])/l1*rr,B0[1]+(A0[1]-B0[1])/l1*rr];
+    const e2=[B0[0]+(C0[0]-B0[0])/l2*rr,B0[1]+(C0[1]-B0[1])/l2*rr];
+    loc.push(e1,...quad(e1,B0,e2));
+  }
+  loc.push(corner[corner.length-1]);
+  const d="M"+loc.map(([lt,lr])=>{const g=PT(lr,lt);return `${f(g[0])},${f(g[1])}`;}).join(" L");
+  return `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.0" stroke-linecap="round" stroke-linejoin="round"/>`;
+}
+
+// Obruč vázy: mezikruží se sloty na VNITŘNÍ hraně mířícími DO STŘEDU (sloupky zapadnou zevnitř).
+function vaseRing(cx,cy,R,ringThickness,angles,slotW,slotH,matThick,color,pz){
+  const iR=R-ringThickness;
+  let s=`<path d="${pathEllipse(cx,cy,R,R)} ${pathEllipse(cx,cy,iR,iR)}" fill-rule="evenodd" fill="#ffe8d8" stroke="${color}" stroke-width="1.2"/>`;
+  const f=v=>v.toFixed(2);
+  const midR=(iR+R)/2;                 // střed pásu obruče
+  const hw=slotW/2;                    // tečný polorozměr (tloušťka)
+  const hh=Math.min(slotH,ringThickness-2)/2;  // radiální polorozměr (šířka sloupku), vejde se do pásu
+  for(const a of angles){
+    const ca=Math.cos(a), sa=Math.sin(a);     // radiální směr
+    const tx=-sa, ty=ca;                       // tečný směr
+    const mx=cx+ca*midR, my=cy+sa*midR;        // střed slotu uprostřed pásu
+    const p0=[mx+tx*hw+ca*hh, my+ty*hw+sa*hh];
+    const p1=[mx-tx*hw+ca*hh, my-ty*hw+sa*hh];
+    const p2=[mx-tx*hw-ca*hh, my-ty*hw-sa*hh];
+    const p3=[mx+tx*hw-ca*hh, my+ty*hw-sa*hh];
+    s+=`<path d="M${f(p0[0])} ${f(p0[1])} L${f(p1[0])} ${f(p1[1])} L${f(p2[0])} ${f(p2[1])} L${f(p3[0])} ${f(p3[1])}Z" fill="white" stroke="${color}" stroke-width="0.9"/>`;
+  }
+  if(pz){
+    // spoj v mezeře mezi prvními dvěma sloty, kolmo napříč obrubou, správný puzzle profil
+    const a0=(angles[0]+(angles[1]!==undefined?angles[1]:angles[0]+0.3))/2;
+    const oX=cx+Math.cos(a0)*R, oY=cy+Math.sin(a0)*R;
+    const iX=cx+Math.cos(a0)*iR, iY=cy+Math.sin(a0)*iR;
+    s+=puzzleCutBetween(iX,iY,oX,oY,color);
+  }
+  return s;
+}
+
 // ── Generátor VÁZY ──
 // Stavba zdola: dno (sloty) → spodní sloupky (baňka ven) → 2 slepené obruče uprostřed
 // → vrchní sloupky (stejný tvar, zrcadlově = hrdlo) → horní obruba (sloty).
 // Sloupek je JEDEN tvar; spodní sada jak je, vrchní otočená.
 function generateVaseSVG(p,slotCount){
-  const{bottomW,basketHeight,matThick,staveWidth,ringThickness,kerf,bendAmount,puzzleJoint}=p;
+  const{bottomW,basketHeight,matThick,staveWidth,kerf,bendAmount,puzzleJoint}=p;
+  const ringThickness=Math.max(16,p.ringThickness);   // u vázy minimum 16 mm (nastojato slot se vejde)
   const pz=!!puzzleJoint;            // puzzle zap/vyp z přepínače
   const color="#cc2200";
   const D=bottomW;                 // průměr dna (kruh)
@@ -458,7 +513,7 @@ function generateVaseSVG(p,slotCount){
   const tnw=staveWidth, tl=matThick;
   const staveBodyH=basketHeight;    // výška sloupku = přímo zadaná hodnota (sada spodní i vrchní stejná)
   const staveH=staveBodyH+tl*2;     // + 2 čepy
-  const slotW=Math.max(1,tnw-kerf), slotH=Math.max(1,matThick-kerf);
+  const slotW=Math.max(1,matThick-kerf), slotH=Math.max(1,tnw-kerf);  // nastojato: tečný=tloušťka, radiální=šířka sloupku
   const angles=makeSlotAngles(slotCount);
   const M=24;
   const amp=bendAmount>0?bendAmount:Math.round(D*0.11); // baňka mírná: ⌀180 → ~20mm ven (na 220)
@@ -474,13 +529,13 @@ function generateVaseSVG(p,slotCount){
   // — Střední obruče (2×, slepit k sobě) — mezikruží se sloty + puzzle —
   const midCX=M+bRx*2+30+midRx, midCY=M+midRx;
   const edgeMid=(ringThickness-slotH)/2;
-  parts.push(`<g><text x="${midCX-midRx}" y="${midCY-midRx-5}" font-size="9" fill="#999" font-family="sans-serif">Střední obruč 1/2 — ⌀${(midRx*2).toFixed(0)}mm${pz?" [puzzle]":""}</text>${buildTop(midCX,midCY,midRx,midRx,ringThickness,"round",angles,null,slotW,slotH,edgeMid,color,pz)}</g>`);
+  parts.push(`<g><text x="${midCX-midRx}" y="${midCY-midRx-5}" font-size="9" fill="#999" font-family="sans-serif">Střední obruč 1/2 — ⌀${(midRx*2).toFixed(0)}mm${pz?" [puzzle]":""}</text>${vaseRing(midCX,midCY,midRx,ringThickness,angles,slotW,slotH,matThick,color,pz)}</g>`);
   const mid2CX=midCX+midRx*2+30;
-  parts.push(`<g><text x="${mid2CX-midRx}" y="${midCY-midRx-5}" font-size="9" fill="#999" font-family="sans-serif">Střední obruč 2/2 (celá)</text>${buildTop(mid2CX,midCY,midRx,midRx,ringThickness,"round",angles,null,slotW,slotH,edgeMid,color,false)}</g>`);
+  parts.push(`<g><text x="${mid2CX-midRx}" y="${midCY-midRx-5}" font-size="9" fill="#999" font-family="sans-serif">Střední obruč 2/2 (celá)</text>${vaseRing(mid2CX,midCY,midRx,ringThickness,angles,slotW,slotH,matThick,color,false)}</g>`);
   // — Horní obruba —
   const topCX=mid2CX+midRx+30+topRx,topCY=M+topRx;
   const edgeTop=(ringThickness-slotH)/2;
-  parts.push(`<g><text x="${topCX-topRx}" y="${topCY-topRx-5}" font-size="9" fill="#999" font-family="sans-serif">Horní obruba (1×) — ⌀${(topRx*2).toFixed(0)}mm${pz?" [puzzle]":""}</text>${buildTop(topCX,topCY,topRx,topRx,ringThickness,"round",angles,null,slotW,slotH,edgeTop,color,pz)}</g>`);
+  parts.push(`<g><text x="${topCX-topRx}" y="${topCY-topRx-5}" font-size="9" fill="#999" font-family="sans-serif">Horní obruba (1×) — ⌀${(topRx*2).toFixed(0)}mm${pz?" [puzzle]":""}</text>${vaseRing(topCX,topCY,topRx,ringThickness,angles,slotW,slotH,matThick,color,pz)}</g>`);
   // — Sloupky (jeden tvar, počet = 2× slotCount: spodní + vrchní) —
   const bendW=amp;
   const stavY=M+Math.max(bRx,topRx,midRx)*2+60;
@@ -496,6 +551,54 @@ function generateVaseSVG(p,slotCount){
   const totalW=Math.max(topCX+topRx+M,perRow*sp2+M*2);
   const totalH2=stavY+rows*(staveH+14)+M;
   return{svg:`<svg xmlns="http://www.w3.org/2000/svg" width="${totalW}" height="${totalH2}" viewBox="0 0 ${totalW} ${totalH2}" style="background:white">${parts.join("")}</svg>`};
+}
+
+// Deska křížové přepážky (kruh). x0,y0 = levý horní roh; W=šířka(průměr), bodyH=výška těla,
+// rimExtra=o kolik srdce/deska přečuhuje nad obrubu, tl=tloušťka, kerf, slotFrom "top"/"bottom"
+// (kříž na půl dřeva), withHeart=srdce madlo nahoře.
+function buildPartitionBoard(x0,y0,W,bodyH,rimExtra,tl,kerf,slotFrom,withHeart,color){
+  const f=v=>v.toFixed(2);
+  const slotW=Math.max(1,tl);
+  const cxMid=x0+W/2;
+  const top=y0+rimExtra, bot=y0+rimExtra+bodyH;  // tělo košíku (top = úroveň obruby)
+  const half=(bot-top)/2;
+  const tenW=Math.max(8,W*0.07), tenH=tl, gap=W*0.22;
+  const t1x=cxMid-gap, t2x=cxMid+gap;
+  let svg="";
+  if(withHeart){
+    // tělo s madlem nahoře (zaoblený výstupek) + vyříznuté srdce uvnitř madla
+    const tabW=Math.max(W*0.34,46), tabH=rimExtra;     // madlo přesahuje nad obrubu o rimExtra
+    const r=Math.min(tabH*0.5,tabW*0.22);
+    const pts=[];
+    pts.push([x0,top]);
+    pts.push([cxMid-tabW/2,top]);
+    pts.push([cxMid-tabW/2,y0+r]);
+    pts.push([cxMid-tabW/2+r,y0]);
+    pts.push([cxMid+tabW/2-r,y0]);
+    pts.push([cxMid+tabW/2,y0+r]);
+    pts.push([cxMid+tabW/2,top]);
+    pts.push([x0+W,top]);
+    pts.push([x0+W,bot]);
+    pts.push([t2x+tenW/2,bot]);pts.push([t2x+tenW/2,bot+tenH]);pts.push([t2x-tenW/2,bot+tenH]);pts.push([t2x-tenW/2,bot]);
+    pts.push([t1x+tenW/2,bot]);pts.push([t1x+tenW/2,bot+tenH]);pts.push([t1x-tenW/2,bot+tenH]);pts.push([t1x-tenW/2,bot]);
+    pts.push([x0,bot]);
+    svg+=`<path d="M${pts.map(p=>f(p[0])+' '+f(p[1])).join(' L')}Z" fill="#ffe8d8" stroke="${color}" stroke-width="1.2"/>`;
+    // vyříznuté srdce (otvor) v madle, s okrajem
+    const hr=rimExtra*0.40;
+    const hcx=cxMid, hcy=y0+rimExtra*0.5;
+    const hpts=[];for(let i=0;i<=200;i++){const t=i/200*Math.PI*2;const pp=heartPt(hcx,hcy,hr,hr,t);hpts.push([pp.x,pp.y]);}
+    svg+=`<path d="M${hpts.map(p=>f(p[0])+' '+f(p[1])).join(' L')}Z" fill="white" stroke="${color}" stroke-width="1"/>`;
+  }else{
+    const pts=[[x0,top],[x0+W,top],[x0+W,bot],
+      [t2x+tenW/2,bot],[t2x+tenW/2,bot+tenH],[t2x-tenW/2,bot+tenH],[t2x-tenW/2,bot],
+      [t1x+tenW/2,bot],[t1x+tenW/2,bot+tenH],[t1x-tenW/2,bot+tenH],[t1x-tenW/2,bot],[x0,bot]];
+    svg+=`<path d="M${pts.map(p=>f(p[0])+' '+f(p[1])).join(' L')}Z" fill="#ffe8d8" stroke="${color}" stroke-width="1.2"/>`;
+  }
+  // křížový zářez na půl dřeva
+  const sw=slotW/2;
+  if(slotFrom==="top")svg+=`<rect x="${f(cxMid-sw)}" y="${f(top-0.1)}" width="${f(slotW)}" height="${f(half+0.1)}" fill="white" stroke="${color}" stroke-width="0.9"/>`;
+  else svg+=`<rect x="${f(cxMid-sw)}" y="${f(top+half)}" width="${f(slotW)}" height="${f(half+0.1)}" fill="white" stroke="${color}" stroke-width="0.9"/>`;
+  return svg;
 }
 
 function generateSVG(p,slotCount){
@@ -535,6 +638,32 @@ function generateSVG(p,slotCount){
     parts.push(`<text x="${M}" y="${cY-5}" font-size="9" fill="#999" font-family="sans-serif">Rohové sloupky (4×)</text>`);
     for(let i=0;i<4;i++)parts.push(buildStave(M+i*sp2+sp2/2,cY,staveWidth,totalH,tnw,tl,"straight",0,1,1,color));
     totalH2=cY+totalH+M;
+  }
+  // ── Křížová přepážka (jen kruh) ── 2 desky na sebe kolmo (kříž na půl dřeva) → 4 oddíly.
+  // Dole čepy do dna (křížový slot +), nahoře srdce madlo na jedné desce.
+  if(p.partition&&shape==="round"){
+    const W=Math.round(bRx*2-2*ringThickness-2);  // šířka = vnitřek obruby −2mm (projde po nasazení obruče)
+    const rimExtra=Math.max(28,Math.round(ringThickness*2.4)); // přesah madla nad obrubu (na srdce)
+    const pY=totalH2+10;
+    parts.push(`<text x="${M}" y="${pY-2}" font-size="9" fill="#999" font-family="sans-serif">Přepážka — deska 1/2 (kříž shora) — ${W}mm</text>`);
+    parts.push(buildPartitionBoard(M,pY+4,W,basketHeight,rimExtra,matThick,kerf,"top",false,color));
+    const pY2=pY+rimExtra+basketHeight+tl+34;
+    parts.push(`<text x="${M}" y="${pY2-2}" font-size="9" fill="#999" font-family="sans-serif">Přepážka — deska 2/2 (kříž zdola + srdce madlo) — ${W}mm</text>`);
+    parts.push(buildPartitionBoard(M,pY2+4,W,basketHeight,rimExtra,matThick,kerf,"bottom",true,color));
+    totalH2=pY2+rimExtra+basketHeight+tl*2+M;
+    totalW=Math.max(totalW,M+W+M);
+    // sloty ve dně pro čepy přepážky: kříž (+) uprostřed + zarovnané čárky
+    const tenW=Math.max(8,W*0.07), gap=W*0.22, sH=Math.max(1,matThick-kerf), sW=Math.max(1,matThick-kerf);
+    const cs=[];
+    // deska A (vodorovná v dně, čep i uprostřed): − čárky na x=-gap,0,+gap
+    cs.push([bCX-gap,bCY,tenW,sH]);cs.push([bCX,bCY,tenW,sH]);cs.push([bCX+gap,bCY,tenW,sH]);
+    // deska B (svislá v dně, uprostřed je její zářez → čep jen po stranách): | čárky na y=-gap,+gap
+    cs.push([bCX,bCY-gap,sW,tenW]);cs.push([bCX,bCY+gap,sW,tenW]);
+    // kříž (+) uprostřed: krátká svislá čárka přes střed (vůle pro zaklesnutí)
+    cs.push([bCX,bCY,sW,tenW*0.8]);
+    let csSvg="";
+    for(const[x,y,w,h]of cs)csSvg+=`<rect x="${(x-w/2).toFixed(2)}" y="${(y-h/2).toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" fill="white" stroke="${color}" stroke-width="0.9"/>`;
+    parts[0]=parts[0].replace("</g>",csSvg+"</g>");
   }
   // ── Kroužek na obrubu (jen ovál/kruh) ── mezikruží, vnější = obruba, šířka = 3/4 obruby,
   // BEZ slotů. Přilepí se na obrubu (zakryje sloty, zmenší otvor). Vyříznutý vnitřek slouží jako víko.
@@ -682,10 +811,10 @@ const I18N={
   slotOrient:"Orientace slotů",tan:"Naležato (po obvodu)",rad:"Nastojato (kolmo)",
   slotInfo1:"Sloty i čepy se dopočítají automaticky:",
   puzzle:"Puzzle spoj horní obruby",puzzleLabel:"Puzzle spoj (skládací)",
-  lid:"Víko",lidLabel:"Přidat kroužek na obrubu",
+  lid:"Víko",lidLabel:"Přidat kroužek na obrubu",partition:"Přepážka",partitionLabel:"Křížová přepážka (4 oddíly)",partitionInfo:"Dvě desky zaklesnuté křížem (na půl dřeva) rozdělí košík na 4 oddíly. Dole čepy do dna, nahoře srdce jako madlo.",
   lidInfo:"Kroužek (3/4 šířky obruby) se přilepí na obrubu a zakryje sloty. Vyříznutý vnitřek použiješ jako víko.",
   overview:"Přehled",ovBottom:"Dno",ovTop:"Vršek",ovBodyH:"Výška těla",ovStave:"Sloupek",ovTenon:"Čep",ovStaves:"Sloupků",
-  gallery:"Hotové výrobky",galleryCap:"Srdcový košík vyrobený na laseru podle tohoto generátoru 💜",
+  gallery:"Hotové výrobky",galleryCap:"Srdcový košík vyrobený na laseru podle tohoto generátoru 💜",feedback:"Poznámky a připomínky",fbName:"Jméno (nepovinné)",fbEmail:"Váš email (pro odpověď)",fbMsg:"Zpráva, nápad nebo připomínka…",fbSend:"Odeslat",fbSending:"Odesílám…",fbThanks:"Díky! Zpráva byla odeslána. 💜",fbErr:"Odeslání se nezdařilo, zkuste to prosím znovu.",
   on:"✓ Zapnuto",off:"Vypnuto"},
  en:{flag:"🇬🇧",name:"English",
   subtitle:"Patterns for laser cutter · mm",donate:"☕ Support",kofi:"❤️ Ko-fi",
@@ -705,10 +834,10 @@ const I18N={
   slotOrient:"Slot orientation",tan:"Lengthwise (along rim)",rad:"Upright (perpendicular)",
   slotInfo1:"Slots and tenons are calculated automatically:",
   puzzle:"Puzzle joint of top rim",puzzleLabel:"Puzzle joint (foldable)",
-  lid:"Lid",lidLabel:"Add ring to rim",
+  lid:"Lid",lidLabel:"Add ring to rim",partition:"Divider",partitionLabel:"Cross divider (4 sections)",partitionInfo:"Two boards cross-lapped (half-lap joint) split the basket into 4 sections. Tenons into the base, a heart handle on top.",
   lidInfo:"The ring (3/4 of rim width) glues onto the rim and covers the slots. Use the cut-out centre as a lid.",
   overview:"Overview",ovBottom:"Base",ovTop:"Top",ovBodyH:"Body height",ovStave:"Stave",ovTenon:"Tenon",ovStaves:"Staves",
-  gallery:"Finished products",galleryCap:"Heart basket laser-cut from this generator 💜",
+  gallery:"Finished products",galleryCap:"Heart basket laser-cut from this generator 💜",feedback:"Notes & feedback",fbName:"Name (optional)",fbEmail:"Your email (for a reply)",fbMsg:"Message, idea or feedback…",fbSend:"Send",fbSending:"Sending…",fbThanks:"Thanks! Your message was sent. 💜",fbErr:"Sending failed, please try again.",
   on:"✓ On",off:"Off"},
  de:{flag:"🇩🇪",name:"Deutsch",
   subtitle:"Vorlagen für Laserschneider · mm",donate:"☕ Unterstützen",kofi:"❤️ Ko-fi",
@@ -728,10 +857,10 @@ const I18N={
   slotOrient:"Schlitzausrichtung",tan:"Längs (am Rand)",rad:"Aufrecht (senkrecht)",
   slotInfo1:"Schlitze und Zapfen werden automatisch berechnet:",
   puzzle:"Puzzle-Verbindung des Randes",puzzleLabel:"Puzzle-Verbindung (faltbar)",
-  lid:"Deckel",lidLabel:"Ring am Rand hinzufügen",
+  lid:"Deckel",lidLabel:"Ring am Rand hinzufügen",partition:"Trennwand",partitionLabel:"Kreuz-Trennwand (4 Fächer)",partitionInfo:"Zwei kreuzweise verkämmte Bretter (halbe Holzstärke) teilen den Korb in 4 Fächer. Unten Zapfen in den Boden, oben ein Herz als Griff.",
   lidInfo:"Der Ring (3/4 der Randbreite) wird auf den Rand geklebt und verdeckt die Schlitze. Das ausgeschnittene Innenteil dient als Deckel.",
   overview:"Übersicht",ovBottom:"Boden",ovTop:"Oben",ovBodyH:"Körperhöhe",ovStave:"Stäbchen",ovTenon:"Zapfen",ovStaves:"Stäbchen",
-  gallery:"Fertige Produkte",galleryCap:"Herzkorb, lasergeschnitten mit diesem Generator 💜",
+  gallery:"Fertige Produkte",galleryCap:"Herzkorb, lasergeschnitten mit diesem Generator 💜",feedback:"Anmerkungen & Feedback",fbName:"Name (optional)",fbEmail:"Ihre E-Mail (für Antwort)",fbMsg:"Nachricht, Idee oder Anmerkung…",fbSend:"Senden",fbSending:"Senden…",fbThanks:"Danke! Ihre Nachricht wurde gesendet. 💜",fbErr:"Senden fehlgeschlagen, bitte erneut versuchen.",
   on:"✓ An",off:"Aus"},
  sv:{flag:"🇸🇪",name:"Svenska",
   subtitle:"Mönster för laserskärare · mm",donate:"☕ Stöd",kofi:"❤️ Ko-fi",
@@ -751,22 +880,35 @@ const I18N={
   slotOrient:"Spårriktning",tan:"Längs (längs kanten)",rad:"Upprätt (vinkelrätt)",
   slotInfo1:"Spår och tappar beräknas automatiskt:",
   puzzle:"Pusselfog för övre kanten",puzzleLabel:"Pusselfog (vikbar)",
-  lid:"Lock",lidLabel:"Lägg till ring på kanten",
+  lid:"Lock",lidLabel:"Lägg till ring på kanten",partition:"Mellanvägg",partitionLabel:"Korsmellanvägg (4 fack)",partitionInfo:"Två kryssförband (halvt trä) delar korgen i 4 fack. Tappar i botten, ett hjärta som handtag upptill.",
   lidInfo:"Ringen (3/4 av kantbredden) limmas på kanten och täcker spåren. Den utskurna mitten används som lock.",
   overview:"Översikt",ovBottom:"Botten",ovTop:"Topp",ovBodyH:"Kroppshöjd",ovStave:"Stav",ovTenon:"Tapp",ovStaves:"Stavar",
-  gallery:"Färdiga produkter",galleryCap:"Hjärtkorg laserskuren med denna generator 💜",
+  gallery:"Färdiga produkter",galleryCap:"Hjärtkorg laserskuren med denna generator 💜",feedback:"Anteckningar & feedback",fbName:"Namn (valfritt)",fbEmail:"Din e-post (för svar)",fbMsg:"Meddelande, idé eller feedback…",fbSend:"Skicka",fbSending:"Skickar…",fbThanks:"Tack! Ditt meddelande har skickats. 💜",fbErr:"Det gick inte att skicka, försök igen.",
   on:"✓ På",off:"Av"}
 };
 
 function App(){
   const [p,setP]=useState(DEF),[tab,setTab]=useState("3d"),[svg,setSvg]=useState({svg:""}),[donate,setDonate]=useState(false);
   const [lang,setLang]=useState("cs");
+  const [fb,setFb]=useState({name:"",email:"",msg:""});
+  const [fbStatus,setFbStatus]=useState("");  // "", "sending", "ok", "err"
+  const sendFeedback=async()=>{
+    if(!fb.msg.trim())return;
+    setFbStatus("sending");
+    try{
+      const r=await fetch("https://formsubmit.co/ajax/gravirpp@gmail.com",{
+        method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},
+        body:JSON.stringify({jmeno:fb.name,email:fb.email,zprava:fb.msg,_subject:"Generátor košíků – zpětná vazba"})
+      });
+      if(r.ok){setFbStatus("ok");setFb({name:"",email:"",msg:""});}else setFbStatus("err");
+    }catch(e){setFbStatus("err");}
+  };
   const t=k=>(I18N[lang]&&I18N[lang][k])||I18N.cs[k]||k;
   const set=k=>v=>setP(prev=>{
     if(k==="shape"&&v==="heart"&&prev.shape!=="heart")
       return {...prev,shape:"heart",bottomW:200,bottomH:150,topW:200,topH:150,basketHeight:80,staveWidth:10};
     if(k==="shape"&&v==="vase"&&prev.shape!=="vase")
-      return {...prev,shape:"vase",bottomW:180,bottomH:180,topW:180,topH:180,basketHeight:100,staveWidth:10,ringThickness:12,bendType:"straight",bendAmount:0};
+      return {...prev,shape:"vase",bottomW:180,bottomH:180,topW:180,topH:180,basketHeight:100,staveWidth:10,ringThickness:16,bendType:"straight",bendAmount:0};
     return {...prev,[k]:v};
   });
   // Režim "ošatka": vršek se dopočítá automaticky z prohnutí S-křivky
@@ -881,7 +1023,7 @@ function App(){
         <Sec>{t("hAndMat")}</Sec>
         <Sl label={t("staveH")} value={p.basketHeight} min={40} max={400} step={5} onChange={set("basketHeight")}/>
         <Sl label={t("staveW")} value={p.staveWidth} min={8} max={40} step={1} onChange={set("staveWidth")}/>
-        <Sl label={t("ringW")} value={p.ringThickness} min={8} max={40} step={1} onChange={set("ringThickness")}/>
+        <Sl label={t("ringW")} value={p.ringThickness} min={vase?16:8} max={40} step={1} onChange={set("ringThickness")}/>
         <Sl label={t("matThick")} value={p.matThick} min={2} max={8} step={0.1} onChange={set("matThick")}/>
         <Sl label={t("kerf")} value={p.kerf} min={0} max={1} step={0.05} onChange={set("kerf")}/>
         <Sec>{t("count")}</Sec>
@@ -905,6 +1047,13 @@ function App(){
             {t("lidInfo")}
           </div>}
         </>}
+        {p.shape==="round"&&<>
+          <Sec>{t("partition")}</Sec>
+          <Toggle label={t("partitionLabel")} value={p.partition} onChange={set("partition")} on={t("on")} off={t("off")}/>
+          {p.partition&&<div style={{background:"rgba(255,200,100,0.08)",borderRadius:8,padding:"6px 10px",marginBottom:8,fontSize:10,color:"#c09040",lineHeight:1.6}}>
+            {t("partitionInfo")}
+          </div>}
+        </>}
         <Sec>{t("overview")}</Sec>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 10px",fontSize:11}}>
           {[[t("ovBottom"),`${p.bottomW}×${isRound?p.bottomW:p.bottomH}mm`],[t("ovTop"),`${p.topW}×${isRound?p.topW:p.topH}mm`],[t("ovBodyH"),`${p.basketHeight}mm`],[t("ovStave"),`${totalH.toFixed(0)}mm`],[t("ovTenon"),`${tnw.toFixed(1)}×${p.matThick}mm`],[t("ovStaves"),`${slotCount}${p.shape==="rect"?"+4r":""} ${t("pcs")}`]].map(([k,v])=>(
@@ -918,6 +1067,13 @@ function App(){
           <img src={GALLERY_IMG} alt={t("gallery")} style={{width:"100%",display:"block"}}/>
         </div>
         <p style={{fontSize:10,color:"#7a5028",textAlign:"center",margin:"6px 0 0",lineHeight:1.5}}>{t("galleryCap")}</p>
+        <Sec>{t("feedback")}</Sec>
+        <input value={fb.name} onChange={e=>setFb({...fb,name:e.target.value})} placeholder={t("fbName")} style={{width:"100%",boxSizing:"border-box",marginBottom:6,padding:"8px 10px",borderRadius:8,border:"1px solid #3a1a06",background:"#1a0a02",color:"#f0c060",fontSize:12}}/>
+        <input value={fb.email} onChange={e=>setFb({...fb,email:e.target.value})} placeholder={t("fbEmail")} style={{width:"100%",boxSizing:"border-box",marginBottom:6,padding:"8px 10px",borderRadius:8,border:"1px solid #3a1a06",background:"#1a0a02",color:"#f0c060",fontSize:12}}/>
+        <textarea value={fb.msg} onChange={e=>setFb({...fb,msg:e.target.value})} placeholder={t("fbMsg")} rows={3} style={{width:"100%",boxSizing:"border-box",marginBottom:6,padding:"8px 10px",borderRadius:8,border:"1px solid #3a1a06",background:"#1a0a02",color:"#f0c060",fontSize:12,resize:"vertical",fontFamily:"inherit"}}/>
+        <button onClick={sendFeedback} disabled={fbStatus==="sending"||!fb.msg.trim()} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:fb.msg.trim()?"pointer":"default",fontSize:12,fontWeight:700,background:fb.msg.trim()?"#6a3010":"#2a1808",color:fb.msg.trim()?"#f0c060":"#6a4828"}}>{fbStatus==="sending"?t("fbSending"):t("fbSend")}</button>
+        {fbStatus==="ok"&&<p style={{fontSize:11,color:"#80c880",textAlign:"center",margin:"8px 0 0"}}>{t("fbThanks")}</p>}
+        {fbStatus==="err"&&<p style={{fontSize:11,color:"#e08080",textAlign:"center",margin:"8px 0 0"}}>{t("fbErr")}</p>}
       </div>
     </div>
   </div>;
